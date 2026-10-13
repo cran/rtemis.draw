@@ -1,0 +1,440 @@
+# test-draw_a3.R
+# Tests for draw_a3() and its internal layout/helper functions
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+test_that("a3_seq_coords returns correct length", {
+  coords <- rtemis.draw:::a3_seq_coords(100L, 21L)
+  expect_length(coords$xs, 100L)
+  expect_length(coords$ys, 100L)
+})
+
+test_that("a3_seq_coords x oscillates between 1 and n_per_row", {
+  n_per_row <- 10L
+  coords <- rtemis.draw:::a3_seq_coords(50L, n_per_row)
+  # All raw x values (before border offsets) should be near [1, n_per_row]
+  expect_true(all(coords$xs >= 0.8 & coords$xs <= n_per_row + 0.2))
+})
+
+test_that("a3_seq_coords y increases monotonically by row", {
+  coords <- rtemis.draw:::a3_seq_coords(21L, 21L)
+  # First 20 residues: y close to 1; residue 21 (right-turn): y = 1.5
+  expect_equal(coords$ys[[1L]], 1.0)
+  expect_equal(coords$ys[[21L]], 1.5, tolerance = 1e-10)
+})
+
+test_that("a3_seq_coords handles single-residue sequences", {
+  coords <- rtemis.draw:::a3_seq_coords(1L, 21L)
+  expect_equal(coords$xs, 1.0)
+  expect_equal(coords$ys, 1.0)
+})
+
+test_that("a3_scale_x scales correctly", {
+  expect_equal(rtemis.draw:::a3_scale_x(1, 0.3), 1.0)
+  expect_equal(rtemis.draw:::a3_scale_x(21, 0.3), 1 + 20 * 0.3)
+  expect_equal(rtemis.draw:::a3_scale_x(5, 1), 5.0)
+})
+
+test_that("a3_with_alpha converts hex to rgba", {
+  expect_equal(
+    rtemis.draw:::a3_with_alpha("#0F766E", 0.35),
+    "rgba(15, 118, 110, 0.35)"
+  )
+  # Short hex
+  expect_equal(rtemis.draw:::a3_with_alpha("#F00", 1), "rgba(255, 0, 0, 1)")
+  # Non-hex passthrough
+  expect_equal(rtemis.draw:::a3_with_alpha("red", 0.5), "red")
+})
+
+test_that("a3_flex_positions handles integer vector", {
+  result <- rtemis.draw:::a3_flex_positions(c(1L, 5L, 10L))
+  expect_equal(result, c(1L, 5L, 10L))
+})
+
+test_that("a3_flex_positions expands matrix ranges", {
+  mat <- matrix(c(1L, 3L, 7L, 9L), ncol = 2L, byrow = TRUE)
+  result <- rtemis.draw:::a3_flex_positions(mat)
+  expect_equal(result, c(1L, 2L, 3L, 7L, 8L, 9L))
+})
+
+test_that("a3_circular_offset returns x and y", {
+  off <- rtemis.draw:::a3_circular_offset(1L, 4L, 10)
+  expect_named(off, c("x", "y"))
+  # At index=1 of 4: angle = 2*pi/4 = pi/2 → x = sin(pi/2)*10 = 10, y = cos(pi/2)*10 ≈ 0
+  expect_equal(off$x, 10, tolerance = 1e-10)
+  expect_equal(off$y, 0, tolerance = 1e-10)
+})
+
+# ── draw_a3 ───────────────────────────────────────────────────────────────────
+
+test_that("draw_a3 rejects non-A3 input", {
+  expect_error(draw_a3("MAEPR"), class = "rtemis_error")
+  expect_error(draw_a3(list(sequence = "MAEPR")), class = "rtemis_error")
+})
+
+test_that("draw_a3 creates htmlwidget from minimal A3 object", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPRQEFEVMEDHAGTYGLGDRK")
+  w <- draw_a3(a)
+  expect_s3_class(w, "htmlwidget")
+})
+
+test_that("draw_a3 option has correct axis structure", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPRQEFEVMEDHAGTYGLGDRK")
+  w <- draw_a3(a)
+  opt <- w$x$option
+  expect_equal(opt$xAxis$type, "value")
+  expect_equal(opt$xAxis$show, FALSE)
+  expect_equal(opt$yAxis$type, "value")
+  expect_equal(opt$yAxis$inverse, TRUE)
+  expect_equal(opt$yAxis$show, FALSE)
+})
+
+test_that("draw_a3 backbone series is present when show_markers = TRUE", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPR")
+  w <- draw_a3(a, show_markers = TRUE)
+  series_types <- vapply(w$x$option$series, `[[`, character(1L), "type")
+  series_names <- vapply(
+    w$x$option$series,
+    function(s) s$name %||% "",
+    character(1L)
+  )
+  expect_true("Primary structure" %in% series_names)
+  backbone_idx <- which(series_names == "Primary structure")
+  expect_equal(series_types[[backbone_idx]], "line")
+})
+
+test_that("draw_a3 backbone series is absent when show_markers = FALSE", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPR")
+  w <- draw_a3(a, show_markers = FALSE)
+  series_names <- vapply(
+    w$x$option$series,
+    function(s) s$name %||% "",
+    character(1L)
+  )
+  expect_false("Primary structure" %in% series_names)
+})
+
+test_that("draw_a3 includes region series for annotated A3", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3(
+    "MAEPRQEFEVMEDHAGTYGLGDRK",
+    region = list(
+      Domain_A = rtemis.a3::annotation_range(
+        matrix(c(3L, 10L), ncol = 2L, byrow = TRUE)
+      )
+    )
+  )
+  w <- draw_a3(a)
+  series_names <- vapply(
+    w$x$option$series,
+    function(s) s$name %||% "",
+    character(1L)
+  )
+  expect_true("Domain_A" %in% series_names)
+  region_idx <- which(series_names == "Domain_A")
+  expect_equal(w$x$option$series[[region_idx]]$type, "line")
+})
+
+test_that("draw_a3 includes site series for annotated A3", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3(
+    "MAEPRQEFEVMEDHAGTYGLGDRK",
+    site = list(
+      Active_site = rtemis.a3::annotation_position(c(5L, 17L))
+    )
+  )
+  w <- draw_a3(a)
+  series_names <- vapply(
+    w$x$option$series,
+    function(s) s$name %||% "",
+    character(1L)
+  )
+  expect_true("Active_site" %in% series_names)
+  site_idx <- which(series_names == "Active_site")
+  expect_equal(w$x$option$series[[site_idx]]$type, "scatter")
+  # Site data should have 2 points
+  expect_length(w$x$option$series[[site_idx]]$data, 2L)
+})
+
+test_that("draw_a3 residue labels series is present when show_labels = TRUE", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPR")
+  w <- draw_a3(a, show_labels = TRUE)
+  series_names <- vapply(
+    w$x$option$series,
+    function(s) s$name %||% "",
+    character(1L)
+  )
+  expect_true("Residue labels" %in% series_names)
+})
+
+test_that("draw_a3 position labels series absent when position_every = NULL", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPRQEFEVMEDHAGTYGLGDRK")
+  w <- draw_a3(a, position_every = NULL)
+  series_names <- vapply(
+    w$x$option$series,
+    function(s) s$name %||% "",
+    character(1L)
+  )
+  expect_false("Position labels" %in% series_names)
+})
+
+test_that("draw_a3 title is included in option", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPR")
+  w <- draw_a3(a, title = "MAPT")
+  expect_equal(w$x$option$title$text, "MAPT")
+})
+
+test_that("draw_a3 legend is plain and vertical", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPRQEFEVMEDHAGTYGLGDRK")
+  w <- draw_a3(a)
+  legend <- w$x$option$legend
+  expect_equal(legend$type, "plain")
+  expect_equal(legend$orient, "vertical")
+  # rtemislive's A3 setup owns this annotation rail, independently of the
+  # shared categorical legend defaults and their semantic config fields.
+  expect_equal(legend$top, 68)
+  expect_equal(legend$right, 16)
+  expect_equal(legend$itemGap, 10)
+  expect_equal(w[["x"]][["a3"]][["legendGap"]], 40)
+  expect_null(w[["x"]][["legendPosition"]])
+  expect_null(w[["x"]][["legendPlacement"]])
+  expect_false("legend_position" %in% names(A3Config@properties))
+})
+
+test_that("draw_a3 height is auto-computed when NULL", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPRQEFEVMEDHAGTYGLGDRK")
+  # height should be set in the widget sizingPolicy, not in the option;
+  # the widget itself is the check — it should not error
+  w <- draw_a3(a, height = NULL)
+  expect_s3_class(w, "htmlwidget")
+  # Explicit height is forwarded
+  w2 <- draw_a3(a, height = 500)
+  expect_equal(w2$height, 500)
+})
+
+test_that("draw_a3 dataZoom absent when enable_zoom = FALSE", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPRQEFEVMEDHAGTYGLGDRK")
+  w <- draw_a3(a, enable_zoom = FALSE)
+  expect_null(w$x$option$dataZoom)
+})
+
+test_that("draw_a3 n_per_row validation works", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3("MAEPR")
+  expect_error(draw_a3(a, n_per_row = 1L), class = "rtemis_error")
+})
+
+
+test_that("A3 legend headings and annotations survive callback-free SVG export", {
+  skip_if_not_installed("rtemis.a3")
+  skip_if_no_node()
+  a <- rtemis.a3::create_A3(
+    "MAEPRQEFEVMEDHAGTYGLGDRK",
+    region = list(
+      Domain = rtemis.a3::annotation_range(matrix(c(3L, 10L), ncol = 2))
+    ),
+    ptm = list(Phosphorylation = rtemis.a3::annotation_position(5L)),
+    processing = list(Cleavage = rtemis.a3::annotation_position(17L))
+  )
+  w <- draw_a3(a, n_per_row = 12L, font_size = 12, marker_size = 16)
+  expect_null(w[["x"]][["option"]][["legend"]][["formatter"]])
+  expect_no_error(strip_js(w[["x"]]))
+  path <- tempfile(fileext = ".svg")
+  on.exit(unlink(path), add = TRUE)
+  for (widget in list(w, draw_panels(list(w, w), ncol = 2))) {
+    save_drawing(widget, path, width = 1400, height = 600)
+    svg <- paste(readLines(path, warn = FALSE), collapse = "\n")
+    for (label in c(
+      "Regions",
+      "PTMs",
+      "Processing",
+      "Domain",
+      "Phosphorylation",
+      "Cleavage"
+    )) {
+      expect_match(svg, paste0(">", label, "</text>"), fixed = TRUE)
+    }
+    expect_false(grepl('<image|__legend_heading|\\{heading\\|', svg))
+  }
+})
+
+test_that("A3 shares responsive surface hints and native geometry across renderers", {
+  skip_if_not_installed("rtemis.a3")
+  skip_if_no_node()
+  a <- rtemis.a3::create_A3(
+    "MAEPRQEFEVMEDHAGTYGLGDRK",
+    region = list(
+      Domain = rtemis.a3::annotation_range(matrix(c(3L, 10L), ncol = 2))
+    ),
+    site = list(Site = rtemis.a3::annotation_position(8L)),
+    ptm = list(Phosphorylation = rtemis.a3::annotation_position(5L)),
+    processing = list(Cleavage = rtemis.a3::annotation_position(17L))
+  )
+  w <- draw_a3(a, theme = theme_dark())
+  expect_true(w[["x"]][["a3"]][["autoHeight"]])
+  expect_false(draw_a3(a, height = 400)[["x"]][["a3"]][["autoHeight"]])
+  expect_false(draw_a3(a, grid = Grid(left = 40))[["x"]][["a3"]][["autoGrid"]])
+  expect_identical(
+    draw(setup_A3Config(), data = a)[["x"]][["a3"]],
+    w[["x"]][["a3"]]
+  )
+  expect_false(draw(setup_A3Config(), data = a, height = 400)[["x"]][["a3"]][[
+    "autoHeight"
+  ]])
+  input <- tempfile(fileext = ".json")
+  on.exit(unlink(input), add = TRUE)
+  jsonlite::write_json(
+    list(
+      payload = strip_js(w[["x"]]),
+      echarts = system.file(
+        "htmlwidgets/lib/echarts/echarts.min.js",
+        package = "rtemis.draw"
+      ),
+      layout = system.file(
+        "htmlwidgets/lib/draw/panels.js",
+        package = "rtemis.draw"
+      ),
+      binding = system.file(
+        "htmlwidgets/rtemis-draw.js",
+        package = "rtemis.draw"
+      )
+    ),
+    input,
+    auto_unbox = TRUE,
+    null = "null",
+    digits = NA
+  )
+  out <- system2(
+    Sys.which("node"),
+    c(shQuote(test_path("fixtures", "a3_geometry.js")), shQuote(input)),
+    stdout = TRUE,
+    stderr = TRUE
+  )
+  expect_null(attr(out, "status"), info = paste(out, collapse = "\n"))
+  expect_match(paste(out, collapse = "\n"), "A3 spacing")
+})
+
+
+test_that("A3 empty display choices and zero marker configs still export", {
+  skip_if_not_installed("rtemis.a3")
+  skip_if_no_node()
+  a <- rtemis.a3::create_A3("MAEPR")
+  path <- tempfile(fileext = ".svg")
+  on.exit(unlink(path), add = TRUE)
+  blank <- draw_a3(a, show_markers = FALSE, show_labels = FALSE)
+  expect_identical(blank[["x"]][["option"]][["legend"]][["data"]], character(0))
+  expect_identical(blank[["x"]][["option"]][["series"]], character(0))
+  expect_no_error(save_drawing(blank, path))
+  expect_no_error(save_drawing(
+    draw(setup_A3Config(marker_size = 0), data = a),
+    path
+  ))
+})
+
+
+test_that("A3 automatic colors and overrides share a portable config contract", {
+  skip_if_not_installed("rtemis.a3")
+  fields <- c(
+    "residue_fill",
+    "residue_stroke",
+    "label_color",
+    "pos_label_color",
+    "variant_color",
+    "disease_variant_color"
+  )
+  config <- setup_A3Config()
+  for (field in fields) {
+    expect_null(S7::prop(config, field))
+    expect_error(do.call(setup_A3Config, setNames(list(42), field)))
+  }
+  a <- rtemis.a3::create_A3(
+    "MAEPRQEFEVMEDHAGTYGLGDRK",
+    site = list(
+      `Disease-Associated Variant` = rtemis.a3::annotation_position(4L)
+    )
+  )
+  direct <- draw_a3(a, residue_fill = "#123456", label_color = "#abcdef")
+  config <- setup_A3Config(residue_fill = "#123456", label_color = "#abcdef")
+  expect_identical(draw(config, data = a)[["x"]], direct[["x"]])
+  hint <- direct[["x"]][["a3"]]
+  for (palette in c("colorsLight", "colorsDark")) {
+    expect_identical(hint[[palette]][["residueFill"]], "#123456")
+    expect_identical(hint[[palette]][["label"]], "#abcdef")
+  }
+  expect_identical(hint[["labelRoles"]][[4]], "diseaseVariant")
+  path <- tempfile(fileext = ".json")
+  on.exit(unlink(path), add = TRUE)
+  for (complete in c(FALSE, TRUE)) {
+    write_chart_config(config, path, complete = complete)
+    back <- read_chart_config(path)
+    expect_identical(back@residue_fill, "#123456")
+    expect_null(back@residue_stroke)
+  }
+  if (node_tests_enabled()) {
+    svg_path <- tempfile(fileext = ".svg")
+    on.exit(unlink(svg_path), add = TRUE)
+    save_drawing(draw(config, data = a, theme = theme_dark()), svg_path)
+    svg <- paste(readLines(svg_path, warn = FALSE), collapse = "\n")
+    expect_match(svg, "#123456", fixed = TRUE)
+    expect_match(svg, "#abcdef", fixed = TRUE)
+    expect_match(svg, "#f472b6", fixed = TRUE)
+  }
+})
+
+
+test_that("A3 residue tooltips include annotations without overlay hit targets", {
+  skip_if_not_installed("rtemis.a3")
+  a <- rtemis.a3::create_A3(
+    "MAEPRQEFEV",
+    region = list(
+      `Domain <A> {a}` = rtemis.a3::annotation_range(matrix(
+        c(2L, 7L),
+        ncol = 2
+      ))
+    ),
+    site = list(Binding = rtemis.a3::annotation_position(4L)),
+    ptm = list(Phosphorylation = rtemis.a3::annotation_position(4L)),
+    processing = list(Cleavage = rtemis.a3::annotation_position(4L)),
+    variant = list(rtemis.a3::annotation_variant(
+      4L,
+      info = list(mutation = "P4A")
+    ))
+  )
+  series <- draw_a3(a)$x$option$series
+  backbone <- series[[which(vapply(
+    series,
+    function(s) identical(s$name, "Primary structure"),
+    logical(1)
+  ))]]
+  text <- backbone$data[[4]]$tooltip$formatter
+  expect_match(text, "4: Proline", fixed = TRUE)
+  expect_match(text, "Regions: Domain &lt;A&gt; &#123;a&#125;", fixed = TRUE)
+  for (label in c(
+    "Sites: Binding",
+    "PTMs: Phosphorylation",
+    "Processing: Cleavage",
+    "Variant"
+  )) {
+    expect_match(text, label, fixed = TRUE)
+  }
+  expect_equal(backbone$data[[1]]$tooltip$formatter, "1: Methionine")
+  for (name in c("Domain <A> {a}", "Binding", "Phosphorylation", "Cleavage")) {
+    expect_true(
+      series[[which(vapply(
+        series,
+        function(s) identical(s$name, name),
+        logical(1)
+      ))]]$silent
+    )
+  }
+})

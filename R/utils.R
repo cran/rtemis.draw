@@ -1,0 +1,678 @@
+# utils.R
+# Foundational utilities for the draw package:
+# - snake_case to camelCase conversion for JSON serialization
+# - NULL-dropping for clean list output
+# - Type validators for S7 property constraints
+
+# -- snake_case to camelCase conversion ------------------------------------------
+
+#' Convert snake_case to camelCase
+#'
+#' Used internally by `to_list()` methods to convert R-idiomatic snake_case
+#' property names to echarts-expected camelCase JSON keys.
+#'
+#' @param x Character: String in snake_case.
+#' @return Character: String in camelCase.
+#' @keywords internal
+#' @noRd
+#' @examples
+#' snake_to_camel("border_width")   # "borderWidth"
+#' snake_to_camel("font_size")      # "fontSize"
+#' snake_to_camel("color")          # "color" (no underscores, unchanged)
+snake_to_camel <- function(x) {
+  gsub("_(\\w)", "\\U\\1", x, perl = TRUE)
+}
+
+# -- Grouping inputs -------------------------------------------------------------
+
+#' Read grouping values from a vector or one-column data frame
+#'
+#' A one-column data frame is an unambiguous vector input. Extract its column
+#' without flattening or coercion so factors, missing values, and row order are
+#' preserved. Column names do not request additional chart labels or legends.
+#'
+#' @param group Optional Atomic vector or data frame: Group identities; a data
+#'   frame must contain exactly one atomic vector column.
+#' @param sizes Optional Numeric: Expected observation counts. Every supplied
+#'   size must match the grouping length; values are never recycled.
+#' @return Optional Atomic vector: The original vector or data-frame column.
+#' @keywords internal
+#' @noRd
+group_values <- new_generic("group_values", "group")
+method(group_values, class_any) <- function(group, sizes = NULL) {
+  if (is.null(group)) {
+    return(NULL)
+  }
+  if (is.data.frame(group)) {
+    if (ncol(group) != 1L) {
+      abort(
+        "Select exactly one column for `group`, or supply a grouping vector.",
+        class = c("rtemis_dim_error", "rtemis_input_error")
+      )
+    }
+    group <- group[[1L]]
+  }
+  if (!is.atomic(group) || !is.null(dim(group))) {
+    abort(
+      "Supply `group` as an atomic vector or a data frame containing one atomic vector column.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  if (any(sizes != length(group))) {
+    abort(
+      "Supply one value of `group` per observation; grouping and data must have the same length.",
+      class = c("rtemis_length_error", "rtemis_input_error")
+    )
+  }
+  group
+}
+
+# -- List utilities --------------------------------------------------------------
+
+#' Drop NULL values from a list
+#'
+#' Removes all NULL entries from a named list. Used by `to_list()` methods
+#' to produce clean JSON (ECharts treats missing keys as defaults).
+#'
+#' @param x List: Named list.
+#' @return List: Input list with `NULL` values removed.
+#' @keywords internal
+#' @noRd
+drop_nulls <- function(x) {
+  x[!vapply(x, function(v) is.null(v) || length(v) == 0L, logical(1))]
+}
+
+#' Convert an S7 object to an echarts-compatible named list
+#'
+#' Extracts all S7 properties, converts names from snake_case to camelCase,
+#' recursively converts nested S7 objects, and drops NULLs.
+#'
+#' @param obj S7 object: Object to serialize.
+#' @param rename Optional Named character vector: Exceptions where the R property name
+#'   does not follow the standard snake_to_camel mapping. Format:
+#'   `c(r_name = "echartsName")`.
+#' @return List: Named list suitable for `jsonlite::toJSON()`.
+#' @keywords internal
+#' @noRd
+props_to_list <- function(obj, rename = NULL) {
+  pnames <- names(S7::S7_class(obj)@properties)
+  vals <- lapply(pnames, function(nm) S7::prop(obj, nm))
+  names(vals) <- pnames
+
+  # Drop NULLs
+  vals <- drop_nulls(vals)
+
+  if (length(vals) == 0L) {
+    return(list())
+  }
+
+  # Convert names: apply explicit renames first, then snake_to_camel
+  out_names <- names(vals)
+  if (!is.null(rename)) {
+    idx <- match(out_names, names(rename))
+    has_rename <- !is.na(idx)
+    out_names[has_rename] <- rename[idx[has_rename]]
+  }
+  out_names <- snake_to_camel(out_names)
+  names(vals) <- out_names
+
+  # Recursively convert S7 objects to lists
+  vals <- lapply(vals, function(v) {
+    if (S7::S7_inherits(v)) {
+      to_list(v)
+    } else if (is.list(v) && !is.null(names(v))) {
+      # Named list: recurse into values
+      lapply(v, function(vv) {
+        if (S7::S7_inherits(vv)) to_list(vv) else vv
+      })
+    } else if (is.list(v)) {
+      # Unnamed list (array): recurse into elements
+      lapply(v, function(vv) {
+        if (S7::S7_inherits(vv)) to_list(vv) else vv
+      })
+    } else {
+      v
+    }
+  })
+
+  vals
+}
+
+# -- Generic to_list method ------------------------------------------------------
+
+#' Convert to echarts-compatible list
+#'
+#' Generic function that converts an S7 object to a plain named list
+#' matching the ECharts JSON option structure.
+#'
+#' @param x S7 object: Object to serialize.
+#' @param ... Dots: Unused.
+#' @return List: Named list.
+#' @export
+#'
+#' @examples
+#' to_list(LineStyle(color = "#16a085", width = 2))
+to_list <- S7::new_generic("to_list", "x")
+
+# -- Type validators for S7 properties -------------------------------------------
+# These return validator functions or S7 class unions.
+
+#' Property that accepts a non-negative numeric scalar, with a default
+#'
+#' For required style values (e.g. node size, edge scale) that always carry a
+#' sensible default in a render-spec option object.
+#' @param default Numeric: Default value.
+#' @keywords internal
+#' @noRd
+nonneg_numeric_default <- function(default) {
+  S7::new_property(
+    class = S7::class_numeric,
+    default = default,
+    validator = function(value) {
+      if (length(value) != 1L || is.na(value) || value < 0) {
+        return("must be a single non-negative number")
+      }
+      NULL
+    }
+  )
+}
+
+#' Property that accepts a probability scalar in \[0, 1\], with a default
+#' @param default Numeric \[0, 1\]: Default value.
+#' @keywords internal
+#' @noRd
+prob_default <- function(default) {
+  S7::new_property(
+    class = S7::class_numeric,
+    default = default,
+    validator = function(value) {
+      if (length(value) != 1L || is.na(value) || value < 0 || value > 1) {
+        return("must be a single number in [0, 1]")
+      }
+      NULL
+    }
+  )
+}
+
+#' Property that accepts a logical scalar, with a default
+#' @param default Logical: Default value.
+#' @keywords internal
+#' @noRd
+logical_default <- function(default) {
+  S7::new_property(
+    class = S7::class_logical,
+    default = default,
+    validator = function(value) {
+      if (length(value) != 1L || is.na(value)) {
+        return("must be a single logical (TRUE or FALSE)")
+      }
+      NULL
+    }
+  )
+}
+
+#' Property that accepts one of a fixed set of strings, with a default
+#'
+#' For render-spec enum fields (e.g. classification, color scheme, corner).
+#' @param choices Character: Allowed values.
+#' @param default Character: Default value (must be in `choices`).
+#' @keywords internal
+#' @noRd
+map_enum_default <- function(choices, default) {
+  force(choices)
+  S7::new_property(
+    class = S7::class_character,
+    default = default,
+    validator = function(value) {
+      if (length(value) != 1L || !value %in% choices) {
+        return(paste0(
+          "must be one of ",
+          paste0("\"", choices, "\"", collapse = ", ")
+        ))
+      }
+      NULL
+    }
+  )
+}
+
+#' Property that accepts a number or NULL
+#' @keywords internal
+#' @noRd
+numeric_or_null_property <- function(default = NULL) {
+  S7::new_property(
+    class = S7::class_any,
+    default = default,
+    validator = function(value) {
+      if (is.null(value)) {
+        return(NULL)
+      }
+      if (!is.numeric(value) || length(value) != 1L) {
+        "must be a single number or NULL"
+      }
+    }
+  )
+}
+
+#' Property that accepts a number, string, or NULL
+#'
+#' Used for echarts fields that accept both pixel values (number) and
+#' percentage strings (e.g. "50%").
+#' @keywords internal
+#' @noRd
+numeric_or_string_property <- function(default = NULL) {
+  S7::new_property(
+    class = S7::class_any,
+    default = default,
+    validator = function(value) {
+      if (is.null(value)) {
+        return(NULL)
+      }
+      if (!is.numeric(value) && !is.character(value)) {
+        return("must be a number, string, or NULL")
+      }
+      if (length(value) != 1L) {
+        return("must be a single value")
+      }
+      NULL
+    }
+  )
+}
+
+#' Convert a color to an rgba string with specified alpha
+#'
+#' Parses any R color specification (hex, named color, etc.) and returns
+#' an `rgba()` CSS color string with the given alpha.
+#'
+#' @param color Character: R color string.
+#' @param alpha Numeric `[0, 1]`: Alpha value.
+#' @return Character: `rgba()` color string.
+#' @keywords internal
+#' @noRd
+color_with_alpha <- function(color, alpha) {
+  rgb <- grDevices::col2rgb(color)[, 1]
+  sprintf("rgba(%d, %d, %d, %g)", rgb[1], rgb[2], rgb[3], alpha)
+}
+
+
+# %% auto_alpha ----
+#' Choose point opacity from the number of points
+#'
+#' A rough overplotting heuristic: few points are drawn nearly opaque, and
+#' opacity falls with the log of the count so that stacked points stay
+#' distinguishable. It is 0.75 at 10 points, 0.57 at 150, 0.45 at 1,000 and
+#' 0.3 at 10,000, clamped to `[0.15, 0.9]`.
+#'
+#' @param n Integer `[0, Inf)`: Number of points drawn.
+#' @return Numeric `[0.15, 0.9]`: Opacity.
+#' @author EDG
+#' @keywords internal
+#' @noRd
+auto_alpha <- function(n) {
+  min(0.9, max(0.15, 0.9 - 0.15 * log10(max(n, 1))))
+}
+
+
+# %% DEFAULT_PAD ----
+# How much room an axis leaves around the data, as a fraction of its range, when
+# limits are not given. 0.04 matches base R's `xaxs = "r"`, which extends the
+# range by 4% at each end.
+#
+# Every `pad` default in the package refers to this, so changing the convention
+# is a one-line change here rather than a sweep through every chart.
+DEFAULT_PAD <- 0.04
+
+
+#' Calculate padded axis limits from data
+#'
+#' Computes `c(min, max)` from `values` with symmetric padding as a fraction
+#' of the data range.
+#'
+#' @param values Numeric: Data values. `NA` values are ignored.
+#' @param pad Numeric `[0, Inf)`: Fraction of the data range added on each side.
+#' @return Numeric: Length-2 vector `c(min, max)`.
+#' @keywords internal
+#' @noRd
+calc_limits <- function(values, pad = DEFAULT_PAD) {
+  rng <- range(values, na.rm = TRUE)
+  span <- rng[2] - rng[1]
+  if (span == 0) {
+    span <- abs(rng[1]) * 0.1
+  } # handle constant data
+  c(rng[1] - pad * span, rng[2] + pad * span)
+}
+
+
+#' Parse a user-supplied `margins` argument into a named list of per-side values
+#'
+#' Validates a named `margins` argument supplied to `draw_*` functions and
+#' returns a list with elements `top`, `right`, `bottom`, `left`, each either
+#' the user-supplied value (numeric or character) or `NULL` when the user did
+#' not specify that side. Accepts a named numeric vector
+#' (e.g. `c(left = 80, right = 20)`) or a named list
+#' (e.g. `list(left = 80, right = "10%")`). The list form is required when any
+#' side is a percentage string. Sides are matched by name; unrecognised names
+#' error with a corrective message.
+#'
+#' @param margins Optional Named numeric vector or named list: User-supplied
+#'   margins argument. Valid names are `"top"`, `"right"`, `"bottom"`, `"left"`.
+#' @return Named list with elements `top`, `right`, `bottom`, `left`, each
+#'   either the user-supplied value or `NULL`.
+#' @keywords internal
+#' @noRd
+parse_margins <- function(margins) {
+  empty <- list(top = NULL, right = NULL, bottom = NULL, left = NULL)
+  if (is.null(margins)) {
+    return(empty)
+  }
+  # Accept a named atomic vector (numeric / character) or a named list.
+  if (!is.list(margins) && !is.atomic(margins)) {
+    abort(
+      "`margins` must be a named numeric vector or named list.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  nms <- names(margins)
+  if (is.null(nms) || any(!nzchar(nms))) {
+    abort(
+      "`margins` must be named with any of 'top', 'right', 'bottom', 'left'.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  valid_sides <- c("top", "right", "bottom", "left")
+  bad <- setdiff(nms, valid_sides)
+  if (length(bad) > 0L) {
+    abort(
+      "`margins` has unrecognised names: ",
+      paste(bad, collapse = ", "),
+      ". Valid names are: ",
+      paste(valid_sides, collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (any(duplicated(nms))) {
+    abort(
+      "`margins` has duplicate names: ",
+      paste(unique(nms[duplicated(nms)]), collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  for (side in valid_sides) {
+    if (!(side %in% nms)) {
+      next
+    }
+    val <- margins[[side]]
+    if (is.null(val) || (length(val) == 1L && is.na(val))) {
+      next
+    }
+    if (
+      !((is.numeric(val) && length(val) == 1L) ||
+        (is.character(val) && length(val) == 1L))
+    ) {
+      abort(
+        "`margins` element '",
+        side,
+        "' must be a single number or string (e.g. '10%'); got ",
+        class(val)[1],
+        " of length ",
+        length(val),
+        ".",
+        class = c("rtemis_type_error", "rtemis_input_error")
+      )
+    }
+    empty[[side]] <- val
+  }
+  empty
+}
+
+#' Resolve a user-supplied `margins` argument into a [Grid] (or `NULL`)
+#'
+#' Convenience wrapper around `parse_margins()` that builds a [Grid] with the
+#' specified sides set (other sides left `NULL` so echarts' default behaviour
+#' still applies to them). Returns `NULL` when `margins` is `NULL` so callers
+#' can pass the result straight to `EChartsOption(grid = ...)`.
+#'
+#' @param margins Optional Named numeric vector or named list: User-supplied
+#'   margins argument. Valid names are `"top"`, `"right"`, `"bottom"`, `"left"`.
+#' @return Optional [Grid]: `Grid` object with the specified sides set, or
+#'   `NULL` when `margins` is `NULL`.
+#' @keywords internal
+#' @noRd
+resolve_margins <- function(margins) {
+  if (is.null(margins)) {
+    return(NULL)
+  }
+  m <- parse_margins(margins)
+  Grid(
+    top = m[["top"]],
+    right = m[["right"]],
+    bottom = m[["bottom"]],
+    left = m[["left"]]
+  )
+}
+
+
+#' Validate an axis-limits argument
+#'
+#' Checks that a user-supplied `xlim`/`ylim`/`zlim` value is either `NULL` or a
+#' length-2 numeric vector. Errors with a corrective [rtemis.core::abort()] message
+#' otherwise. Returns the value invisibly so callers can chain if desired.
+#'
+#' @param value Any: User-supplied limits value.
+#' @param arg Character: Name of the caller argument (e.g. `"xlim"`) used in
+#'   the error message.
+#' @return Invisibly, `value`.
+#' @keywords internal
+#' @noRd
+validate_axis_lim <- function(value, arg) {
+  if (is.null(value)) {
+    return(invisible(value))
+  }
+  if (!is.numeric(value) || length(value) != 2L || !all(is.finite(value))) {
+    abort(
+      "`",
+      arg,
+      "` must be a length-2 finite numeric vector or `NULL`.",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  invisible(value)
+}
+
+
+#' Property that accepts a character vector of colors, or NULL
+#'
+#' Used for color palettes (e.g. theme and option `color` fields).
+#' @keywords internal
+#' @noRd
+color_palette_property <- function(default = NULL) {
+  S7::new_property(
+    class = S7::class_any,
+    default = default,
+    validator = function(value) {
+      if (is.null(value)) {
+        return(NULL)
+      }
+      if (is.character(value)) {
+        return(NULL)
+      }
+      "must be a character vector of colors or NULL"
+    }
+  )
+}
+
+#' Property that accepts a symbol offset or NULL
+#'
+#' echarts' `symbolOffset` shifts a symbol from its data point, in *screen*
+#' pixels or as a percentage of the symbol's own size. It is applied after
+#' `symbolRotate`, in the unrotated frame, so it is independent of the axis
+#' scales -- which is what makes it usable for pixel-exact glyph anchoring.
+#'
+#' Accepts a single value (applied to both axes, matching
+#' `normalizeSymbolOffset()` in `src/util/symbol.ts`) or a length-2 vector of
+#' `c(x, y)`. Numbers are pixels; strings are percentages, e.g. `"-50%"`.
+#' @keywords internal
+#' @noRd
+symbol_offset_property <- function(default = NULL) {
+  S7::new_property(
+    class = S7::class_any,
+    default = default,
+    validator = function(value) {
+      if (is.null(value)) {
+        return(NULL)
+      }
+      if (!is.numeric(value) && !is.character(value)) {
+        return("must be a number, percentage string, or NULL")
+      }
+      if (length(value) < 1L || length(value) > 2L) {
+        return("must be a single value or a length-2 vector c(x, y)")
+      }
+      NULL
+    }
+  )
+}
+
+#' Property that accepts an S7 class instance or NULL
+#' @keywords internal
+#' @noRd
+class_or_null_property <- function(s7_class) {
+  S7::new_property(
+    class = S7::class_any,
+    default = NULL,
+    validator = function(value) {
+      if (is.null(value)) {
+        return(NULL)
+      }
+      if (!S7::S7_inherits(value, s7_class)) {
+        paste0("must be a ", s7_class@name, " object or NULL")
+      }
+    }
+  )
+}
+
+
+# %% lighten() ----
+#' Lighten colors
+#'
+#' Lightens colors by linear interpolation toward white in RGB space
+#' (a "tint"): each RGB channel moves `amount` of its remaining distance
+#' toward 255. The alpha channel is preserved unchanged.
+#'
+#' @param x Character: R color specification(s) (hex string or named color).
+#' @param amount Numeric \[0, 1]: Fraction of the distance toward white to
+#'   move each channel. `0` returns the input unchanged, `1` returns white.
+#' @return Character: Hex color string(s), same length as `x`, with names
+#'   preserved. Opaque colors are returned as `"#RRGGBB"`; colors with alpha
+#'   as `"#RRGGBBAA"`.
+#' @author EDG
+#' @keywords internal
+#' @noRd
+lighten <- function(x, amount = 0.1) {
+  if (
+    !is.numeric(amount) ||
+      length(amount) != 1L ||
+      is.na(amount) ||
+      amount < 0 ||
+      amount > 1
+  ) {
+    abort(
+      "`amount` must be a single numeric value in [0, 1].",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  # Work in [0, 1]
+  rgba <- grDevices::col2rgb(x, alpha = TRUE) / 255
+  # Move each RGB channel `amount` of the way toward 1; leave alpha as is.
+  rgba[1:3, ] <- rgba[1:3, ] + (1 - rgba[1:3, ]) * amount
+  out <- character(ncol(rgba))
+  opaque <- rgba[4L, ] == 1
+  out[opaque] <- grDevices::rgb(
+    rgba[1L, opaque],
+    rgba[2L, opaque],
+    rgba[3L, opaque]
+  )
+  out[!opaque] <- grDevices::rgb(
+    rgba[1L, !opaque],
+    rgba[2L, !opaque],
+    rgba[3L, !opaque],
+    alpha = rgba[4L, !opaque]
+  )
+  # grDevices::rgb() drops names; restore them so named palettes survive.
+  names(out) <- names(x)
+  out
+}
+
+
+# %% palette_colors ----
+#' Strip names from a color palette
+#'
+#' ECharts takes a palette as a JSON **array**. `rtemis.core::rtemis_colors` is
+#' a *named* vector -- deliberately, so callers can write
+#' `rtemis_colors[["teal"]]` -- and htmlwidgets serializes named vectors as JSON
+#' objects (`keep_vec_names = TRUE`). A named palette therefore reaches the
+#' browser as `{"teal": "#6CA3A0", ...}` where an array is expected, and the
+#' chart renders with no colors at all, with only a jsonlite deprecation warning
+#' to show for it.
+#'
+#' Every palette entering an option goes through here, including one the caller
+#' supplied: a user passing a named vector hits the same failure.
+#'
+#' @param x Character: Colors.
+#'
+#' @return Character: `x` without names.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+palette_colors <- function(x) {
+  unname(x)
+} # /rtemis.draw::palette_colors
+
+
+# %% check_dots_empty ----
+#' Reject arguments `draw()` does not recognize
+#'
+#' Every `draw()` method takes `...` so that a backend can declare arguments the
+#' generic does not know about (`renderer`, `meta`). Those are declared *after*
+#' `...` and so must be named, which leaves `...` empty in any correct call --
+#' and makes anything landing in it a name the method does not have.
+#'
+#' Without this an unknown name is silently dropped, which is the worst way for
+#' a typo to behave: the chart still renders, just not as asked.
+#'
+#' @param ... Arguments a `draw()` method did not match.
+#'
+#' @return NULL, invisibly. Called for its side effect.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+check_dots_empty <- function(...) {
+  n <- ...length()
+  if (n == 0L) {
+    return(invisible(NULL))
+  }
+  named <- names(list(...))
+  named <- named[nzchar(named)]
+  abort(
+    if (length(named) > 0L) {
+      paste0(
+        "Unrecognized argument",
+        if (length(named) > 1L) "s" else "",
+        " to draw(): ",
+        paste0("`", named, "`", collapse = ", "),
+        "."
+      )
+    } else {
+      paste0(
+        "draw() takes ",
+        n,
+        " unnamed argument",
+        if (n > 1L) "s" else "",
+        " it does not recognize; every optional argument must be named."
+      )
+    },
+    class = c("rtemis_value_error", "rtemis_input_error")
+  )
+} # /rtemis.draw::check_dots_empty

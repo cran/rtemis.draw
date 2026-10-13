@@ -1,0 +1,278 @@
+{
+  "rtemis-draw-renderers-1.0.0": {
+    "scripts": [
+      "renderers.js"
+    ],
+    "md5": [
+      "cc8f42fcd19a0bbd23bfdf0b24bcf8c4"
+    ]
+  },
+  "rtemis-panel-layout-1.0.1": {
+    "scripts": [
+      "panels.js",
+      "confusion.js",
+      "panel_widget.js"
+    ],
+    "md5": [
+      "c05b6ea5e304aeb3371ddd22a22c2035",
+      "3651363082c0e387220144668cceb4e1",
+      "88320c7a672053433c91adba7f72ea59"
+    ]
+  },
+  "rtemis-draw-binding-0.5.3": {
+    "scripts": [
+      "rtemis-draw.js"
+    ],
+    "md5": [
+      "01cfb7977f12f898a98be6016a486ca2"
+    ]
+  },
+  "rtemis-panel-layout-1.0.2": {
+    "scripts": [
+      "panels.js",
+      "confusion.js",
+      "panel_widget.js"
+    ],
+    "md5": [
+      "0c7163a78618449aff4f2af44579b00b",
+      "3651363082c0e387220144668cceb4e1",
+      "88320c7a672053433c91adba7f72ea59"
+    ]
+  },
+  "rtemis-draw-binding-0.5.4": {
+    "scripts": [
+      "rtemis-draw.js"
+    ],
+    "md5": [
+      "3611e9a391f3109b05a2c51e25f95f3a"
+    ]
+  },
+  "rtemis-panel-layout-1.0.3": {
+    "scripts": [
+      "panels.js",
+      "confusion.js",
+      "panel_widget.js"
+    ],
+    "md5": [
+      "89ed807dd02abb190d5691b734fbff63",
+      "3651363082c0e387220144668cceb4e1",
+      "88320c7a672053433c91adba7f72ea59"
+    ]
+  },
+  "rtemis-draw-binding-0.5.5": {
+    "scripts": [
+      "rtemis-draw.js"
+    ],
+    "md5": [
+      "3611e9a391f3109b05a2c51e25f95f3a"
+    ]
+  },
+  "rtemis-panel-layout-1.0.4": {
+    "scripts": [
+      "panels.js",
+      "confusion.js",
+      "a3.js",
+      "panel_widget.js"
+    ],
+    "md5": [
+      "cea84f95e28c1eaf063a64d499dd80e1",
+      "3651363082c0e387220144668cceb4e1",
+      "32b64cfad0489b329b8ce74974c2186a",
+      "ca5750ba961ca56c09b06a83ae32205e"
+    ]
+  },
+  "rtemis-draw-binding-0.5.6": {
+    "scripts": [
+      "rtemis-draw.js"
+    ],
+    "md5": [
+      "2c4de1f454a6964b0dd3e857bba38479"
+    ]
+  },
+  "rtemis-panel-layout-1.0.5": {
+    "scripts": [
+      "panels.js",
+      "confusion.js",
+      "a3.js",
+      "panel_widget.js"
+    ],
+    "md5": [
+      "4a3033a9ead0f98657f8f2c714f79241",
+      "98e316a5f257b6054521c87c60acf622",
+      "32b64cfad0489b329b8ce74974c2186a",
+      "ca5750ba961ca56c09b06a83ae32205e"
+    ]
+  },
+  "rtemis-draw-binding-0.5.7": {
+    "scripts": [
+      "rtemis-draw.js"
+    ],
+    "md5": [
+      "e45b1d71d348859de694599104c7bbc6"
+    ]
+  },
+  "rtemis-draw-binding-0.5.2": {
+    "scripts": [
+      "rtemis-draw.js"
+    ],
+    "md5": [
+      "e45b1d71d348859de694599104c7bbc6"
+    ]
+  },
+  "rtemis-panel-layout-1.0.6": {
+    "scripts": [
+      "panels.js",
+      "confusion.js",
+      "a3.js",
+      "panel_widget.js"
+    ],
+    "md5": [
+      "e59bbda8bbdf92cb67917f7cccb19692",
+      "98e316a5f257b6054521c87c60acf622",
+      "d35d723753c796470a8513968a8f15b2",
+      "ca5750ba961ca56c09b06a83ae32205e"
+    ]
+  },
+  "rtemis-draw-binding-0.5.2.9000": {
+    "scripts": [
+      "rtemis-draw.js"
+    ],
+    "md5": [
+      "e45b1d71d348859de694599104c7bbc6"
+    ]
+  },
+  "rtemis-graph-binding-0.5.2.9000": {
+    "scripts": [
+      "rtemis-graph.js"
+    ],
+    "md5": [
+      "299c5acb5c2b3170260b4b94e0647c96"
+    ]
+  },
+  "rtemis-graph-deps-1.0.0": {
+    "scripts": [
+      "rtemis-graph-deps.js"
+    ],
+    "md5": [
+      "76910f062eab78d22531f041ab740f37"
+    ]
+  },
+  "rtemis-graph-scene-1.0.0": {
+    "scripts": [
+      "graph_scene.js"
+    ],
+    "md5": [
+      "e000bdcfba822cda2e39373a4b6257c8"
+    ]
+  },
+  "rtemis-vector-theme-1.0.0": {
+    "scripts": [
+      "vector_theme.js"
+    ],
+    "md5": [
+      "689f9d135a4b24c7184ee61cbf57650d"
+    ]
+  },
+  "rtemis-map-binding-0.5.2.9000": {
+    "scripts": [
+      "rtemis-map.js"
+    ],
+    "md5": [
+      "dfb239d253cad3a0697888e0af1ecfd2"
+    ]
+  },
+  "rtemis-map-deps-1.0.0": {
+    "scripts": [
+      "rtemis-map-deps.js"
+    ],
+    "md5": [
+      "2f05461b2a2e13ee2df23a3d59d2b5ec"
+    ]
+  },
+  "rtemis-map-scene-1.0.0": {
+    "scripts": [
+      "map_scene.js"
+    ],
+    "md5": [
+      "5b0ca490d0248b9a14631b2cdc82d290"
+    ]
+  },
+  "rtemis-graph-binding-0.5.3": {
+    "scripts": [
+      "rtemis-graph.js"
+    ],
+    "md5": [
+      "6fc5925b988ac05ececd877f8245a740"
+    ]
+  },
+  "rtemis-map-binding-0.5.3": {
+    "scripts": [
+      "rtemis-map.js"
+    ],
+    "md5": [
+      "fe08a2195057e97b6421b080e40fbe2b"
+    ]
+  },
+  "rtemis-draw-renderers-1.1.0": {
+    "scripts": [
+      "renderers.js"
+    ],
+    "md5": [
+      "d238ead22bdbc70ee13b17a67c437810"
+    ]
+  },
+  "rtemis-draw-renderers-1.2.0": {
+    "scripts": [
+      "renderers.js"
+    ],
+    "md5": [
+      "b5fb9c9240908b9b99977f169657915b"
+    ]
+  },
+  "rtemis-draw-renderers-1.3.0": {
+    "scripts": [
+      "renderers.js",
+      "scatter3d.js"
+    ],
+    "md5": [
+      "541d5b0b2e82843a24b623b04625938c",
+      "e9c11316de720e46668ffc86ae66adb8"
+    ]
+  },
+  "rtemis-panel-layout-1.0.7": {
+    "scripts": [
+      "panels.js",
+      "confusion.js",
+      "a3.js",
+      "panel_widget.js"
+    ],
+    "md5": [
+      "a7339bb9890104c6cba5ba694b1067fb",
+      "98e316a5f257b6054521c87c60acf622",
+      "d35d723753c796470a8513968a8f15b2",
+      "ca5750ba961ca56c09b06a83ae32205e"
+    ]
+  },
+  "rtemis-panel-layout-1.0.8": {
+    "scripts": [
+      "panels.js",
+      "confusion.js",
+      "a3.js",
+      "panel_widget.js"
+    ],
+    "md5": [
+      "ec52b0f34411dfb611f7c620fab2cbf9",
+      "d5d43b5e56aebb4e51c303776a0e52cd",
+      "d35d723753c796470a8513968a8f15b2",
+      "ca5750ba961ca56c09b06a83ae32205e"
+    ]
+  },
+  "rtemis-theme-watch-1.0.0": {
+    "scripts": [
+      "theme_watch.js"
+    ],
+    "md5": [
+      "cb88e7763d4869f0a911fc2efd43215f"
+    ]
+  }
+}

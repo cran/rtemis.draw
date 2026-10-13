@@ -1,0 +1,409 @@
+# config_line.R
+# ::rtemis.draw::
+# 2026- EDG rtemis.org
+
+# The line chart's config. Multi-series like bar, plus a background-band binding
+# (`blocks`) and axis limits like scatter.
+#
+# `line_style` is deliberately **not** a property: it is a [LineStyle] object,
+# part of the rendering IR that mirrors ECharts, and giving it a wire form would
+# mean schematizing that IR. A caller wanting it builds the option directly.
+
+# %% LineConfig ----
+#' Line Chart Configuration
+#'
+#' A serializable description of a line chart. Build one with
+#' [setup_LineConfig()] rather than calling this constructor directly.
+#'
+#' `x` names the column along the horizontal axis. `y` names **one or more**
+#' columns, one line each, as [BarConfig] does.
+#'
+#' @param x Optional Character: Column along the horizontal axis. A numeric
+#'   column gets a value axis, a `Date` or `POSIXct` column a time axis with
+#'   adaptively chosen labels, and any other column a category axis.
+#' @param y Optional Character: Columns to plot, one line each.
+#' @param group Optional Character: Column to group and color lines by. Splits
+#'   a single `y` column into one line per level; cannot be combined with
+#'   several `y` columns or with `blocks`.
+#' @param blocks Optional Character: Column whose contiguous runs shade vertical
+#'   background bands.
+#' @param smooth Logical: Draw smoothed lines.
+#' @param area Logical: Fill the area under each line.
+#' @param points Logical: Show a marker at each data value.
+#' @param zoom Logical: Enable the zoom control.
+#' @param palette Optional Character: Series colors, overriding the theme
+#'   palette for this chart. `NULL` uses the theme's.
+#' @param block_color Optional Character: Band colors.
+#' @param block_opacity Numeric `[0, 1]`: Band opacity.
+#' @param pad Numeric `[0, Inf)`: Fraction of the data range to extend each axis
+#'   by when the limits are not given.
+#' @param square Logical: If TRUE, draw the plotting box square -- equal height
+#'   and width in pixels, excluding axis labels and margins.
+#' @param equal_axes Logical: If TRUE, give one data unit the same size in
+#'   pixels on both axes. Set with `square` for a plot that is both, such as an
+#'   ROC curve; the two axes are then made to span the same interval. Requires a
+#'   numeric x.
+#' @param xlim,ylim Optional Numeric: Axis limits, length 2. `NULL` derives them
+#'   from the data, padded by `pad`. On a time axis `xlim` is in epoch
+#'   milliseconds, the unit the chart positions by.
+#' @param xlab,ylab Optional Character: Axis labels. `NULL` derives them from
+#'   the data.
+#' @param margin_top,margin_right,margin_bottom,margin_left Optional Integer
+#'   `[0, Inf)`: Plot margins in pixels.
+#' @inheritParams draw_line legend_position legend_placement
+#' @inheritParams ChartConfig
+#'
+#' @return `LineConfig` object.
+#'
+#' @author EDG
+#' @export
+#'
+#' @examples
+#' setup_LineConfig(x = "wt", y = "mpg")@type
+LineConfig <- new_class(
+  name = "LineConfig",
+  parent = ChartConfig,
+  package = "rtemis.draw",
+  properties = c(
+    legend_properties(),
+    list(
+      type = prop_chart_type("line"),
+      # -- data binding ------------------------------------------------------
+      x = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = paste(
+          "Column along the horizontal axis. Numeric gets a value axis,",
+          "date or date-time a time axis, anything else a category axis."
+        )
+      ),
+      y = prop_string(
+        NULL,
+        nullable = TRUE,
+        vector = TRUE,
+        description = "Columns to plot, one line each."
+      ),
+      group = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = "Column to group and color lines by."
+      ),
+      blocks = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = paste(
+          "Column whose contiguous runs shade vertical background bands.",
+          "Missing entries produce no band."
+        )
+      ),
+      # -- semantics ---------------------------------------------------------
+      smooth = prop_boolean(FALSE, description = "Draw smoothed lines."),
+      area = prop_boolean(
+        FALSE,
+        description = "Fill the area under each line."
+      ),
+      points = prop_boolean(
+        TRUE,
+        description = "Show a marker at each data value."
+      ),
+      zoom = prop_boolean(FALSE, description = "Enable the zoom control."),
+      # -- appearance --------------------------------------------------------
+      palette = prop_string(
+        NULL,
+        nullable = TRUE,
+        vector = TRUE,
+        description = "Series colors, overriding the theme palette. Unset uses the theme's."
+      ),
+      block_color = prop_string(
+        NULL,
+        nullable = TRUE,
+        vector = TRUE,
+        description = "Band colors."
+      ),
+      block_opacity = prop_float(
+        0.2,
+        min = 0,
+        max = 1,
+        description = "Band opacity."
+      ),
+      square = prop_boolean(
+        FALSE,
+        description = paste(
+          "Draw the plotting box square: equal height and width in pixels,",
+          "excluding axis labels and margins."
+        )
+      ),
+      equal_axes = prop_boolean(
+        FALSE,
+        description = paste(
+          "Give one data unit the same size in pixels on both axes. Combined",
+          "with `square`, both axes are made to span the same interval."
+        )
+      ),
+      pad = prop_float(
+        DEFAULT_PAD,
+        min = 0,
+        description = paste(
+          "Fraction of the data range to extend each axis by when the limits",
+          "are not given."
+        )
+      ),
+      xlim = prop_float(
+        NULL,
+        nullable = TRUE,
+        vector = TRUE,
+        min_items = 2L,
+        description = paste(
+          "X axis limits. Unset derives them from the data.",
+          "On a time axis, epoch milliseconds."
+        )
+      ),
+      ylim = prop_float(
+        NULL,
+        nullable = TRUE,
+        vector = TRUE,
+        min_items = 2L,
+        description = "Y axis limits. Unset derives them from the data."
+      ),
+      xlab = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = "X axis label. Unset derives it from the data."
+      ),
+      ylab = prop_string(
+        NULL,
+        nullable = TRUE,
+        description = "Y axis label. Unset derives it from the data."
+      ),
+      margin_top = prop_integer(
+        NULL,
+        min = 0L,
+        nullable = TRUE,
+        description = "Top margin in pixels."
+      ),
+      margin_right = prop_integer(
+        NULL,
+        min = 0L,
+        nullable = TRUE,
+        description = "Right margin in pixels."
+      ),
+      margin_bottom = prop_integer(
+        NULL,
+        min = 0L,
+        nullable = TRUE,
+        description = "Bottom margin in pixels."
+      ),
+      margin_left = prop_integer(
+        NULL,
+        min = 0L,
+        nullable = TRUE,
+        description = "Left margin in pixels."
+      )
+    )
+  ),
+  validator = config_validator(
+    c(
+      CONFIG_LIMIT_RULES,
+      list(
+        list(
+          schema = list(
+            `if` = list(
+              required = list("group"),
+              properties = list(group = list(not = list(type = "null")))
+            ),
+            then = list(
+              properties = list(
+                y = list(maxItems = 1L),
+                blocks = list(type = "null")
+              )
+            )
+          ),
+          message = "Bind group only with a single y column and without blocks."
+        )
+      )
+    ),
+    extra = config_ordered_limits
+  )
+) # /rtemis.draw::LineConfig
+
+
+# %% LINE_ORIGIN_NAMES ----
+LINE_ORIGIN_NAMES <- setdiff(
+  names(LineConfig@properties),
+  c("type", PROVENANCE_PROPS)
+)
+
+
+# %% setup_LineConfig ----
+#' Set up a Line Chart Configuration
+#'
+#' The seam between convenient input and a complete, validated object. **Every
+#' argument is optional**, which is what lets the published schema require
+#' nothing.
+#'
+#' @inheritParams LineConfig
+#' @param origin Optional Named character: Where each value came from. Normally
+#'   computed from which arguments were supplied; pass it only when restoring a
+#'   config that already carries provenance.
+#' @param writer Optional Named character: Which interface wrote the config.
+#'
+#' @return [LineConfig] object.
+#'
+#' @author EDG
+#' @export
+#'
+#' @examples
+#' draw(setup_LineConfig(x = "wt", y = "mpg"), data = mtcars[order(mtcars$wt), ])
+setup_LineConfig <- function(
+  x = NULL,
+  y = NULL,
+  group = NULL,
+  blocks = NULL,
+  smooth = FALSE,
+  area = FALSE,
+  points = TRUE,
+  zoom = FALSE,
+  palette = NULL,
+  block_color = NULL,
+  block_opacity = 0.2,
+  pad = DEFAULT_PAD,
+  square = FALSE,
+  equal_axes = FALSE,
+  xlim = NULL,
+  ylim = NULL,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  margin_top = NULL,
+  margin_right = NULL,
+  margin_bottom = NULL,
+  margin_left = NULL,
+  dat_path = NULL,
+  origin = NULL,
+  writer = NULL,
+  legend_position = "top",
+  legend_placement = "outside"
+) {
+  origin <- origin %||% chart_origin(match.call(), LINE_ORIGIN_NAMES)
+  LineConfig(
+    x = x,
+    y = y,
+    group = group,
+    blocks = blocks,
+    smooth = smooth,
+    area = area,
+    points = points,
+    zoom = zoom,
+    palette = palette,
+    block_color = block_color,
+    block_opacity = block_opacity,
+    pad = pad,
+    square = square,
+    equal_axes = equal_axes,
+    xlim = xlim,
+    ylim = ylim,
+    xlab = xlab,
+    ylab = ylab,
+    title = title,
+    margin_top = margin_top,
+    margin_right = margin_right,
+    margin_bottom = margin_bottom,
+    margin_left = margin_left,
+    dat_path = dat_path,
+    legend_position = legend_position,
+    legend_placement = legend_placement,
+    origin = origin,
+    writer = writer
+  )
+} # /rtemis.draw::setup_LineConfig
+
+
+# %% resolve.LineConfig ----
+# Labels from the bound columns, as for bar: one y column names the value axis,
+# several name none. Limits are derived only for a numeric x, since a
+# categorical axis has no range to pad.
+method(resolve, LineConfig) <- function(config, data = NULL, ...) {
+  x <- config_column(data, config@x, "x")
+  y_all <- unlist(
+    lapply(config@y, function(column) config_column(data, column, "y")),
+    use.names = FALSE
+  )
+  # See resolve.ScatterConfig: the limits a square, equally-scaled plot needs
+  # are settled here so the document records them. A categorical x has no
+  # interval to share, and the builder rejects that combination. A time x has
+  # a position -- epoch milliseconds, as the builder places it -- so its limits
+  # are recorded in that unit, but it is not a scale to equalize with y.
+  numeric_x <- if (!is.null(x) && is.numeric(x)) x
+  time_x <- if (!is.null(x) && is_time_axis(x)) time_axis_ms(x)
+  common <- equal_axis_limits(
+    numeric_x,
+    y_all,
+    config@xlim,
+    config@ylim,
+    config@pad,
+    config@square,
+    config@equal_axes
+  )
+  config_derive(
+    config,
+    list(
+      xlab = config@x,
+      ylab = if (length(config@y) == 1L) config@y,
+      xlim = common[["xlim"]] %||%
+        if (!is.null(numeric_x %||% time_x)) {
+          calc_limits(numeric_x %||% time_x, config@pad)
+        },
+      ylim = common[["ylim"]] %||%
+        if (!is.null(y_all)) calc_limits(y_all, config@pad)
+    )
+  )
+}
+
+
+# %% compile.LineConfig ----
+method(compile, LineConfig) <- function(config, data = NULL, ...) {
+  x <- config_column(data, config@x, "x")
+  if (is.null(x) || is.null(config@y)) {
+    abort(
+      "A LineConfig needs both `x` and `y` set to draw.",
+      class = c("rtemis_null_input", "rtemis_input_error")
+    )
+  }
+  values <- lapply(config@y, function(column) config_column(data, column, "y"))
+  names(values) <- config@y
+  line_option(
+    x = x,
+    y = if (length(values) == 1L) values[[1L]] else values,
+    group = config_column(data, config@group, "group"),
+    smooth = config@smooth,
+    area = config@area,
+    points = config@points,
+    blocks = config_column(data, config@blocks, "blocks"),
+    block_color = config@block_color,
+    block_opacity = config@block_opacity,
+    palette = config@palette,
+    pad = config@pad,
+    square = config@square,
+    equal_axes = config@equal_axes,
+    xlim = config@xlim,
+    ylim = config@ylim,
+    xlab = config@xlab,
+    ylab = config@ylab,
+    title = config@title,
+    zoom = config@zoom,
+    margins = config_margins(config) %||% DEFAULT_MARGINS
+  )
+}
+
+
+# %% render_meta.LineConfig ----
+# A square or equally-scaled plot is solved in the browser, from the ratio and
+# padding derived here. The limits are already reconciled by resolve(), so this
+# only reads what compile() produced.
+method(render_meta, LineConfig) <- function(config, option) {
+  aspect_meta(
+    option,
+    square = config@square,
+    equal_axes = config@equal_axes
+  )
+}

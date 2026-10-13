@@ -1,0 +1,766 @@
+# series.R
+# Series S7 classes: LineSeries, BarSeries, ScatterSeries, PieSeries,
+#                    BoxplotSeries, HeatmapSeries
+# Plus series-attached marker classes: MarkAreaDataPoint, MarkArea
+#
+# TS sources:
+#   SeriesOption:         src/util/types.ts (line 1867)
+#   LineSeriesOption:     src/chart/line/LineSeries.ts (line 74)
+#   BarSeriesOption:      src/chart/bar/BarSeries.ts (line 68)
+#   ScatterSeriesOption:  src/chart/scatter/ScatterSeries.ts (line 64)
+#   PieSeriesOption:      src/chart/pie/PieSeries.ts (line 105)
+#   BoxplotSeriesOption:  src/chart/boxplot/BoxplotSeries.ts (line 59)
+#   HeatmapSeriesOption:  src/chart/heatmap/HeatmapSeries.ts
+#   MarkAreaOption:       src/component/marker/MarkAreaModel.ts (line 60)
+
+# -- MarkArea -------------------------------------------------------------------
+
+#' Mark Area Data Point
+#'
+#' One endpoint of a `markArea` band. Two of these — wrapped in a length-2 list
+#' — define the opposite corners of a shaded rectangle. Supplying only
+#' `x_axis` on both endpoints produces a full-height vertical band (useful for
+#' highlighting x-ranges of a time series); supplying only `y_axis` produces a
+#' full-width horizontal band.
+#'
+#' Corresponds to `MarkArea2DDataItemDimOption` in
+#' `src/component/marker/MarkAreaModel.ts` (line 49).
+#' ECharts docs:
+#' \url{https://echarts.apache.org/en/option.html#series-line.markArea.data}
+#'
+#' @param x_axis Optional Numeric or Character: Position on the x-axis.
+#' @param y_axis Optional Numeric or Character: Position on the y-axis.
+#' @param name Optional Character: Label text for the band.
+#' @param value Optional Numeric or Character: Fallback label value when
+#'   `name` is not set.
+#' @param item_style Optional [ItemStyle]: Fill and border styling. Styling
+#'   set on the first endpoint of a pair applies to the whole band.
+#' @param label Optional [LabelOption]: Label configuration.
+#'
+#' @return `MarkAreaDataPoint` object.
+#'
+#' @export
+#'
+#' @examples
+#' MarkAreaDataPoint(x_axis = 1, name = "Event window")
+MarkAreaDataPoint <- S7::new_class(
+  "MarkAreaDataPoint",
+  properties = list(
+    x_axis = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if ((is.numeric(value) || is.character(value)) && length(value) == 1L) {
+          return(NULL)
+        }
+        "must be a single number, string, or NULL"
+      }
+    ),
+    y_axis = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if ((is.numeric(value) || is.character(value)) && length(value) == 1L) {
+          return(NULL)
+        }
+        "must be a single number, string, or NULL"
+      }
+    ),
+    name = prop_string(nullable = TRUE),
+    value = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if ((is.numeric(value) || is.character(value)) && length(value) == 1L) {
+          return(NULL)
+        }
+        "must be a single number, string, or NULL"
+      }
+    ),
+    item_style = class_or_null_property(ItemStyle),
+    label = class_or_null_property(LabelOption)
+  )
+)
+
+S7::method(to_list, MarkAreaDataPoint) <- function(x, ...) {
+  props_to_list(x)
+}
+
+#' Mark Area
+#'
+#' Container for `markArea` bands attached to a series. `data` is a list where
+#' each element is a length-2 list of [MarkAreaDataPoint] (or plain named list)
+#' defining the two opposite corners of one band.
+#'
+#' Corresponds to `MarkAreaOption` in
+#' `src/component/marker/MarkAreaModel.ts` (line 60).
+#' ECharts docs:
+#' \url{https://echarts.apache.org/en/option.html#series-line.markArea}
+#'
+#' @param data Optional list: List of length-2 lists of [MarkAreaDataPoint] /
+#'   plain named list. Each inner pair defines one band.
+#' @param silent Optional Logical: Whether hover / tooltip are disabled.
+#' @param precision Optional Integer `[0, Inf)`: Decimal precision used by
+#'   statistical methods (`"min"`, `"max"`, etc.).
+#' @param item_style Optional [ItemStyle]: Default fill/border styling for all
+#'   bands. Per-band overrides go on the first [MarkAreaDataPoint] of a pair.
+#' @param label Optional [LabelOption]: Default label configuration.
+#' @param z2 Optional Numeric: Front-back order among markers.
+#'
+#' @return `MarkArea` object.
+#'
+#' @export
+#'
+#' @examples
+#' # One shaded band, defined by its two corner points.
+#' MarkArea(
+#'   data = list(list(
+#'     MarkAreaDataPoint(x_axis = 1),
+#'     MarkAreaDataPoint(x_axis = 3)
+#'   ))
+#' )
+MarkArea <- S7::new_class(
+  "MarkArea",
+  properties = list(
+    data = S7::new_property(class = S7::class_any, default = NULL),
+    silent = prop_boolean(default = NULL, nullable = TRUE),
+    precision = numeric_or_null_property(),
+    item_style = class_or_null_property(ItemStyle),
+    label = class_or_null_property(LabelOption),
+    z2 = numeric_or_null_property()
+  )
+)
+
+S7::method(to_list, MarkArea) <- function(x, ...) {
+  out <- props_to_list(x)
+  # `data` is a list of length-2 inner lists of MarkAreaDataPoint / plain lists.
+  # `props_to_list()` only recurses one level into lists, so convert explicitly.
+  if (!is.null(out$data)) {
+    out$data <- lapply(out$data, function(pair) {
+      lapply(pair, function(pt) {
+        if (S7::S7_inherits(pt)) to_list(pt) else pt
+      })
+    })
+    out$data <- unname(out$data)
+  }
+  out
+}
+
+# -- LineSeries -----------------------------------------------------------------
+
+#' Line Series
+#'
+#' Configuration for a line chart series.
+#'
+#' Corresponds to `LineSeriesOption` in `src/chart/line/LineSeries.ts` (line 74).
+#' ECharts docs: \url{https://echarts.apache.org/en/option.html#series-line}
+#'
+#' @param name Optional Character: Series name for legend display.
+#' @param data Optional Numeric or list: Data values.
+#' @param x_axis_index Optional Numeric `[0, Inf)`: X-axis index.
+#' @param y_axis_index Optional Numeric `[0, Inf)`: Y-axis index.
+#' @param stack Optional Character: Stack group name.
+#' @param smooth Optional Logical or Numeric `[0, 1]`: Line smoothing.
+#' @param step Optional Logical or Character \{"start", "end", "middle"\}: Step line mode.
+#' @param connect_nulls Optional Logical: Whether to connect across `NULL` points.
+#' @param clip Optional Logical: Whether to clip overflow.
+#' @param show_symbol Optional Logical: Whether to show data-point symbols.
+#' @param symbol Optional Character \{"circle", "rect", "roundRect", "triangle", "diamond", "pin", "arrow", "none"\}: Symbol type.
+#'   `"diamond"`, `"pin"`, `"arrow"`, `"none"`, or custom SVG path.
+#' @param symbol_size Optional Numeric: Symbol size in pixels.
+#' @param symbol_rotate Optional Numeric: Symbol rotation in degrees,
+#'   counter-clockwise-positive. A symbol is unrotated at `0`.
+#' @param symbol_offset Optional Numeric or Character: Shift from the data
+#'   point as `c(x, y)`, in screen pixels (numbers) or as a percentage of the
+#'   symbol's own size (strings, e.g. `c("0%", "-50%")`). Applied *after*
+#'   `symbol_rotate`, in the unrotated frame.
+#' @param color Optional Character: Series color override.
+#' @param line_style Optional [LineStyle]: Line styling.
+#' @param area_style Optional [AreaStyle]: Area fill styling.
+#' @param item_style Optional [ItemStyle]: Data-point marker styling.
+#' @param label Optional [LabelOption]: Data-label configuration.
+#' @param mark_area Optional [MarkArea]: Shaded bands (e.g. vertical
+#'   highlight regions across x-ranges).
+#' @param legend_hover_link Optional Logical: Whether to highlight related legends on hover.
+#' @param silent Optional Logical: Whether the series is silent.
+#' @param z_level Optional Numeric: Canvas layer index.
+#' @param z Optional Numeric: Front-back order within the same layer.
+#'
+#' @return `LineSeries` object.
+#'
+#' @export
+#'
+#' @examples
+#' LineSeries(name = "Sessions", data = c(150, 230, 224), smooth = TRUE)
+LineSeries <- S7::new_class(
+  "LineSeries",
+  properties = list(
+    # Common series fields
+    name = prop_string(nullable = TRUE),
+    data = S7::new_property(class = S7::class_any, default = NULL),
+    x_axis_index = numeric_or_null_property(),
+    y_axis_index = numeric_or_null_property(),
+    stack = prop_string(nullable = TRUE),
+    silent = prop_boolean(default = NULL, nullable = TRUE),
+    legend_hover_link = prop_boolean(default = NULL, nullable = TRUE),
+    color = prop_string(nullable = TRUE),
+    z_level = numeric_or_null_property(),
+    z = numeric_or_null_property(),
+    # Line-specific
+    smooth = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if (is.logical(value) && length(value) == 1L) {
+          return(NULL)
+        }
+        if (is.numeric(value) && length(value) == 1L) {
+          return(NULL)
+        }
+        "must be TRUE/FALSE, a number, or NULL"
+      }
+    ),
+    step = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if (is.logical(value) && length(value) == 1L && !value) {
+          return(NULL)
+        }
+        if (
+          is.character(value) &&
+            length(value) == 1L &&
+            value %in% c("start", "end", "middle")
+        ) {
+          return(NULL)
+        }
+        "must be FALSE, 'start', 'end', 'middle', or NULL"
+      }
+    ),
+    connect_nulls = prop_boolean(default = NULL, nullable = TRUE),
+    clip = prop_boolean(default = NULL, nullable = TRUE),
+    show_symbol = prop_boolean(default = NULL, nullable = TRUE),
+    symbol = prop_string(nullable = TRUE),
+    symbol_size = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if (is.numeric(value) && length(value) <= 2L) {
+          return(NULL)
+        }
+        "must be a number, length-2 numeric vector, or NULL"
+      }
+    ),
+    symbol_rotate = numeric_or_null_property(),
+    symbol_offset = symbol_offset_property(),
+    line_style = class_or_null_property(LineStyle),
+    area_style = class_or_null_property(AreaStyle),
+    item_style = class_or_null_property(ItemStyle),
+    label = class_or_null_property(LabelOption),
+    mark_area = class_or_null_property(MarkArea)
+  )
+)
+
+S7::method(to_list, LineSeries) <- function(x, ...) {
+  out <- props_to_list(x)
+  out$type <- "line"
+  if (is.list(out$data)) {
+    out$data <- unname(out$data)
+  }
+  out
+}
+
+# -- BarSeries ------------------------------------------------------------------
+
+#' Bar Series
+#'
+#' Configuration for a bar chart series.
+#'
+#' Corresponds to `BarSeriesOption` in `src/chart/bar/BarSeries.ts` (line 68)
+#' and `BaseBarSeriesOption` in `src/chart/bar/BaseBarSeries.ts` (line 38).
+#' ECharts docs: \url{https://echarts.apache.org/en/option.html#series-bar}
+#'
+#' @param name Optional Character: Series name for legend display.
+#' @param data Optional Vector or list: Data values.
+#' @param x_axis_index Optional Numeric `[0, Inf)`: X-axis index.
+#' @param y_axis_index Optional Numeric `[0, Inf)`: Y-axis index.
+#' @param stack Optional Character: Stack group name.
+#' @param clip Optional Logical: Whether to clip overflow.
+#' @param bar_width Optional Numeric or Character: Bar width.
+#' @param bar_max_width Optional Numeric or Character: Maximum bar width.
+#' @param bar_min_width Optional Numeric or Character: Minimum bar width.
+#' @param bar_min_height Optional Numeric `[0, Inf)`: Minimum bar height.
+#' @param bar_gap Optional Numeric or Character: Gap between bars in the same category.
+#' @param bar_category_gap Optional Numeric or Character: Gap between categories.
+#' @param round_cap Optional Logical: Whether to use a round cap.
+#' @param show_background Optional Logical: Whether to show the bar background.
+#' @param color Optional Character: Series color override.
+#' @param item_style Optional [ItemStyle]: Bar styling.
+#' @param label Optional [LabelOption]: Data-label configuration.
+#' @param legend_hover_link Optional Logical: Whether to highlight related legends on hover.
+#' @param silent Optional Logical: Whether the series is silent.
+#' @param z_level Optional Numeric: Canvas layer index.
+#' @param z Optional Numeric: Front-back order within the same layer.
+#'
+#' @return `BarSeries` object.
+#'
+#' @export
+#'
+#' @examples
+#' BarSeries(name = "Counts", data = c(3, 7, 2))
+BarSeries <- S7::new_class(
+  "BarSeries",
+  properties = list(
+    # Common series fields
+    name = prop_string(nullable = TRUE),
+    data = S7::new_property(class = S7::class_any, default = NULL),
+    x_axis_index = numeric_or_null_property(),
+    y_axis_index = numeric_or_null_property(),
+    stack = prop_string(nullable = TRUE),
+    silent = prop_boolean(default = NULL, nullable = TRUE),
+    legend_hover_link = prop_boolean(default = NULL, nullable = TRUE),
+    color = prop_string(nullable = TRUE),
+    z_level = numeric_or_null_property(),
+    z = numeric_or_null_property(),
+    # Bar-specific
+    clip = prop_boolean(default = NULL, nullable = TRUE),
+    bar_width = numeric_or_string_property(),
+    bar_max_width = numeric_or_string_property(),
+    bar_min_width = numeric_or_string_property(),
+    bar_min_height = numeric_or_null_property(),
+    bar_gap = numeric_or_string_property(),
+    bar_category_gap = numeric_or_string_property(),
+    round_cap = prop_boolean(default = NULL, nullable = TRUE),
+    show_background = prop_boolean(default = NULL, nullable = TRUE),
+    item_style = class_or_null_property(ItemStyle),
+    label = class_or_null_property(LabelOption)
+  )
+)
+
+S7::method(to_list, BarSeries) <- function(x, ...) {
+  out <- props_to_list(x)
+  # BarSeriesOption.data is an array even when only one score is selected.
+  if (is.atomic(out[["data"]]) && length(out[["data"]]) == 1L) {
+    out[["data"]] <- unname(as.list(out[["data"]]))
+  }
+  out$type <- "bar"
+  if (is.list(out$data)) {
+    out$data <- unname(out$data)
+  }
+  out
+}
+
+# -- ScatterSeries --------------------------------------------------------------
+
+#' Scatter Series
+#'
+#' Configuration for a scatter (point) chart series.
+#'
+#' Corresponds to `ScatterSeriesOption` in `src/chart/scatter/ScatterSeries.ts` (line 64).
+#' ECharts docs: \url{https://echarts.apache.org/en/option.html#series-scatter}
+#'
+#' @param name Optional Character: Series name for legend display.
+#' @param data Optional Vector or list: Data values.
+#' @param x_axis_index Optional Numeric `[0, Inf)`: X-axis index.
+#' @param y_axis_index Optional Numeric `[0, Inf)`: Y-axis index.
+#' @param clip Optional Logical: Whether to clip overflow.
+#' @param symbol Optional Character: Symbol type.
+#' @param symbol_size Optional Numeric or function: Symbol size.
+#' @param symbol_rotate Optional Numeric: Symbol rotation in degrees,
+#'   counter-clockwise-positive. A symbol is unrotated at `0`.
+#' @param symbol_offset Optional Numeric or Character: Shift from the data
+#'   point as `c(x, y)`, in screen pixels (numbers) or as a percentage of the
+#'   symbol's own size (strings, e.g. `c("0%", "-50%")`). Applied *after*
+#'   `symbol_rotate`, in the unrotated frame.
+#' @param color Optional Character: Series color override.
+#' @param item_style Optional [ItemStyle]: Data-point marker styling.
+#' @param label Optional [LabelOption]: Data-label configuration.
+#' @param large Optional Logical: Whether to enable large-data optimization.
+#' @param large_threshold Optional Numeric `[0, Inf)`: Threshold for large mode.
+#' @param legend_hover_link Optional Logical: Whether to highlight related legends on hover.
+#' @param silent Optional Logical: Whether the series is silent.
+#' @param z_level Optional Numeric: Canvas layer index.
+#' @param z Optional Numeric: Front-back order within the same layer.
+#'
+#' @return `ScatterSeries` object.
+#'
+#' @export
+#'
+#' @examples
+#' ScatterSeries(name = "Points", data = list(c(1, 2), c(3, 4)), symbol_size = 8)
+ScatterSeries <- S7::new_class(
+  "ScatterSeries",
+  properties = list(
+    # Common series fields
+    name = prop_string(nullable = TRUE),
+    data = S7::new_property(class = S7::class_any, default = NULL),
+    x_axis_index = numeric_or_null_property(),
+    y_axis_index = numeric_or_null_property(),
+    silent = prop_boolean(default = NULL, nullable = TRUE),
+    legend_hover_link = prop_boolean(default = NULL, nullable = TRUE),
+    color = prop_string(nullable = TRUE),
+    z_level = numeric_or_null_property(),
+    z = numeric_or_null_property(),
+    # Scatter-specific
+    clip = prop_boolean(default = NULL, nullable = TRUE),
+    symbol = prop_string(nullable = TRUE),
+    symbol_size = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if (is.numeric(value) && length(value) <= 2L) {
+          return(NULL)
+        }
+        if (is.function(value)) {
+          return(NULL)
+        }
+        "must be a number, length-2 numeric vector, function, or NULL"
+      }
+    ),
+    symbol_rotate = numeric_or_null_property(),
+    symbol_offset = symbol_offset_property(),
+    large = prop_boolean(default = NULL, nullable = TRUE),
+    large_threshold = numeric_or_null_property(),
+    item_style = class_or_null_property(ItemStyle),
+    label = class_or_null_property(LabelOption)
+  )
+)
+
+S7::method(to_list, ScatterSeries) <- function(x, ...) {
+  out <- props_to_list(x)
+  out$type <- "scatter"
+  if (is.list(out$data)) {
+    out$data <- unname(out$data)
+  }
+  out
+}
+
+# -- PieSeries ------------------------------------------------------------------
+
+#' Pie Label Options
+#'
+#' Outside-label alignment for pie and rose charts. Extends [LabelOption].
+#' Corresponds to `PieLabelOption` in `src/chart/pie/PieSeries.ts`.
+#' ECharts docs: https://echarts.apache.org/en/option.html#series-pie.label
+#'
+#' @inheritParams LabelOption
+#' @param align_to Optional Character \{"none", "labelLine", "edge"\}: Outside-label alignment.
+#' @param edge_distance Optional Numeric or Character: Distance from the plot edge.
+#' @param bleed_margin Optional Numeric: Space outside labels when not edge-aligned.
+#' @param distance_to_label_line Optional Numeric: Gap between label and guide line.
+#' @return A `PieLabelOption` object.
+#' @export
+#' @examples
+#' PieLabelOption(align_to = "edge", edge_distance = 8)
+PieLabelOption <- S7::new_class(
+  "PieLabelOption",
+  parent = LabelOption,
+  properties = list(
+    align_to = prop_string(
+      enum = c("none", "labelLine", "edge"),
+      nullable = TRUE
+    ),
+    edge_distance = numeric_or_string_property(),
+    bleed_margin = numeric_or_null_property(),
+    distance_to_label_line = numeric_or_null_property()
+  )
+)
+
+S7::method(to_list, PieLabelOption) <- function(x, ...) {
+  # Preserve the parent's flattened TextStyle serialization.
+  S7::method(to_list, LabelOption)(x, ...)
+}
+
+#' Pie Series
+#'
+#' Configuration for a pie chart series.
+#'
+#' Corresponds to `PieSeriesOption` in `src/chart/pie/PieSeries.ts` (line 105).
+#' ECharts docs: \url{https://echarts.apache.org/en/option.html#series-pie}
+#'
+#' @param name Optional Character: Series name.
+#' @param data Optional Numeric or list: Pie data. A list of named lists with `value` and `name` fields,
+#'   or a numeric vector.
+#' @param center Optional Numeric or Character: Pie center as a length-2 vector.
+#' @param radius Optional Numeric or Character: Pie radius.
+#' @param rose_type Optional Character \{"radius", "area"\}: Nightingale chart type.
+#' @param clockwise Optional Logical: Whether to lay out sectors clockwise.
+#' @param start_angle Optional Numeric: Starting angle in degrees.
+#' @param end_angle Optional Numeric or Character \{"auto"\}: Ending angle in degrees.
+#' @param pad_angle Optional Numeric `[0, Inf)`: Padding angle between sectors in degrees.
+#' @param min_angle Optional Numeric `[0, Inf)`: Minimum sector angle.
+#' @param min_show_label_angle Optional Numeric `[0, Inf)`: Minimum angle required to show labels.
+#' @param selected_offset Optional Numeric `[0, Inf)`: Offset of a selected sector.
+#' @param avoid_label_overlap Optional Logical: Whether to avoid label overlap automatically.
+#' @param percent_precision Optional Numeric `[0, Inf)`: Decimal precision for percentages.
+#' @param still_show_zero_sum Optional Logical: Whether to show the pie when all values are zero.
+#' @param animation_type Optional Character \{"expansion", "scale"\}: First-render animation type.
+#' @param color Optional Character: Series color override.
+#' @param item_style Optional [ItemStyle]: Pie-sector styling.
+#' @param label Optional [LabelOption]: Data-label configuration.
+#' @param label_line Optional [LabelLine]: Label connector line configuration.
+#' @param legend_hover_link Optional Logical: Whether to highlight related legends on hover.
+#' @param silent Optional Logical: Whether the series is silent.
+#' @param z_level Optional Numeric: Canvas layer index.
+#' @param z Optional Numeric: Front-back order within the same layer.
+#' @param left Optional Numeric or Character: Left position.
+#' @param right Optional Numeric or Character: Right position.
+#' @param top Optional Numeric or Character: Top position.
+#' @param bottom Optional Numeric or Character: Bottom position.
+#'
+#' @return `PieSeries` object.
+#'
+#' @export
+#'
+#' @examples
+#' PieSeries(
+#'   name = "Browser",
+#'   data = list(
+#'     list(value = 1048, name = "Chrome"),
+#'     list(value = 735, name = "Firefox")
+#'   ),
+#'   radius = "50%"
+#' )
+PieSeries <- S7::new_class(
+  "PieSeries",
+  properties = list(
+    # Common series fields
+    name = prop_string(nullable = TRUE),
+    data = S7::new_property(class = S7::class_any, default = NULL),
+    silent = prop_boolean(default = NULL, nullable = TRUE),
+    legend_hover_link = prop_boolean(default = NULL, nullable = TRUE),
+    color = prop_string(nullable = TRUE),
+    z_level = numeric_or_null_property(),
+    z = numeric_or_null_property(),
+    # Pie-specific
+    center = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if (length(value) == 2L && (is.numeric(value) || is.character(value))) {
+          return(NULL)
+        }
+        "must be a length-2 vector of numbers or strings, or NULL"
+      }
+    ),
+    radius = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if ((is.numeric(value) || is.character(value)) && length(value) <= 2L) {
+          return(NULL)
+        }
+        "must be a number/string or length-2 vector, or NULL"
+      }
+    ),
+    rose_type = prop_string(enum = c("radius", "area"), nullable = TRUE),
+    clockwise = prop_boolean(default = NULL, nullable = TRUE),
+    start_angle = numeric_or_null_property(),
+    end_angle = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if (is.numeric(value) && length(value) == 1L) {
+          return(NULL)
+        }
+        if (is.character(value) && length(value) == 1L && value == "auto") {
+          return(NULL)
+        }
+        "must be a number, 'auto', or NULL"
+      }
+    ),
+    pad_angle = numeric_or_null_property(),
+    min_angle = numeric_or_null_property(),
+    min_show_label_angle = numeric_or_null_property(),
+    selected_offset = numeric_or_null_property(),
+    avoid_label_overlap = prop_boolean(default = NULL, nullable = TRUE),
+    percent_precision = numeric_or_null_property(),
+    still_show_zero_sum = prop_boolean(default = NULL, nullable = TRUE),
+    animation_type = prop_string(
+      enum = c("expansion", "scale"),
+      nullable = TRUE
+    ),
+    item_style = class_or_null_property(ItemStyle),
+    label = class_or_null_property(LabelOption),
+    label_line = class_or_null_property(LabelLine),
+    # BoxLayoutOptionMixin
+    left = numeric_or_string_property(),
+    right = numeric_or_string_property(),
+    top = numeric_or_string_property(),
+    bottom = numeric_or_string_property()
+  )
+)
+
+S7::method(to_list, PieSeries) <- function(x, ...) {
+  out <- props_to_list(x)
+  out$type <- "pie"
+  if (is.list(out$data)) {
+    out$data <- unname(out$data)
+  }
+  out
+}
+
+# -- BoxplotSeries --------------------------------------------------------------
+
+#' Boxplot Series
+#'
+#' Configuration for a boxplot chart series.
+#'
+#' Corresponds to `BoxplotSeriesOption` in `src/chart/boxplot/BoxplotSeries.ts` (line 59).
+#' ECharts docs: \url{https://echarts.apache.org/en/option.html#series-boxplot}
+#'
+#' @param name Optional Character: Series name.
+#' @param data Optional list: Boxplot data. Each element is `c(min, Q1, median, Q3, max)`.
+#' @param x_axis_index Optional Numeric `[0, Inf)`: X-axis index.
+#' @param y_axis_index Optional Numeric `[0, Inf)`: Y-axis index.
+#' @param layout Optional Character \{"horizontal", "vertical"\}: Layout orientation.
+#' @param box_width Optional Numeric or Character: Box-width range as a length-2 vector.
+#' @param color Optional Character: Series color override.
+#' @param item_style Optional [ItemStyle]: Boxplot styling.
+#' @param label Optional [LabelOption]: Data-label configuration.
+#' @param legend_hover_link Optional Logical: Whether to highlight related legends on hover.
+#' @param silent Optional Logical: Whether the series is silent.
+#' @param z_level Optional Numeric: Canvas layer index.
+#' @param z Optional Numeric: Front-back order within the same layer.
+#'
+#' @return `BoxplotSeries` object.
+#'
+#' @export
+#'
+#' @examples
+#' # Each element is one box, given as its five-number summary.
+#' BoxplotSeries(
+#'   name = "Distribution",
+#'   data = list(c(850, 940, 960, 980, 1070), c(750, 800, 840, 890, 1020))
+#' )
+BoxplotSeries <- S7::new_class(
+  "BoxplotSeries",
+  properties = list(
+    # Common series fields
+    name = prop_string(nullable = TRUE),
+    data = S7::new_property(class = S7::class_any, default = NULL),
+    x_axis_index = numeric_or_null_property(),
+    y_axis_index = numeric_or_null_property(),
+    silent = prop_boolean(default = NULL, nullable = TRUE),
+    legend_hover_link = prop_boolean(default = NULL, nullable = TRUE),
+    color = prop_string(nullable = TRUE),
+    z_level = numeric_or_null_property(),
+    z = numeric_or_null_property(),
+    # Boxplot-specific
+    layout = prop_string(enum = c("horizontal", "vertical"), nullable = TRUE),
+    box_width = S7::new_property(
+      class = S7::class_any,
+      default = NULL,
+      validator = function(value) {
+        if (is.null(value)) {
+          return(NULL)
+        }
+        if (length(value) == 2L && (is.numeric(value) || is.character(value))) {
+          return(NULL)
+        }
+        "must be a length-2 vector of numbers or strings, or NULL"
+      }
+    ),
+    item_style = class_or_null_property(ItemStyle),
+    label = class_or_null_property(LabelOption)
+  )
+)
+
+S7::method(to_list, BoxplotSeries) <- function(x, ...) {
+  out <- props_to_list(x)
+  out$type <- "boxplot"
+  if (is.list(out$data)) {
+    out$data <- unname(out$data)
+  }
+  out
+}
+
+# -- HeatmapSeries --------------------------------------------------------------
+
+#' Heatmap Series
+#'
+#' Configuration for a heatmap chart series on Cartesian coordinates.
+#' Each data point is a triple `[col_index, row_index, value]` and color
+#' encoding is driven by a [VisualMap] component.
+#'
+#' Corresponds to `HeatmapSeriesOption` in `src/chart/heatmap/HeatmapSeries.ts`.
+#' ECharts docs: \url{https://echarts.apache.org/en/option.html#series-heatmap}
+#'
+#' @param name Optional Character: Series name.
+#' @param data Optional list: Heatmap data. Each element is a length-3 list
+#'   `list(col_index, row_index, value)`.
+#' @param x_axis_index Optional Numeric `[0, Inf)`: X-axis index.
+#' @param y_axis_index Optional Numeric `[0, Inf)`: Y-axis index.
+#' @param label Optional [LabelOption]: Cell label configuration (e.g. show the value).
+#' @param item_style Optional [ItemStyle]: Cell styling (e.g. border color/width).
+#' @param emphasis Optional list: Emphasis (hover) styling. A plain list passed
+#'   through to ECharts, e.g. `list(itemStyle = list(shadowBlur = 10))`.
+#' @param legend_hover_link Optional Logical: Whether to link hover with the legend.
+#' @param silent Optional Logical: Whether the series is silent (no events).
+#' @param z_level Optional Numeric: Canvas layer index.
+#' @param z Optional Numeric: Front-back order within the same layer.
+#'
+#' @return `HeatmapSeries` object.
+#'
+#' @export
+#'
+#' @examples
+#' # Each element is one cell, as c(column index, row index, value).
+#' HeatmapSeries(name = "Density", data = list(c(0, 0, 5), c(1, 0, 3)))
+HeatmapSeries <- S7::new_class(
+  "HeatmapSeries",
+  properties = list(
+    # Common series fields
+    name = prop_string(nullable = TRUE),
+    data = S7::new_property(class = S7::class_any, default = NULL),
+    x_axis_index = numeric_or_null_property(),
+    y_axis_index = numeric_or_null_property(),
+    silent = prop_boolean(default = NULL, nullable = TRUE),
+    legend_hover_link = prop_boolean(default = NULL, nullable = TRUE),
+    z_level = numeric_or_null_property(),
+    z = numeric_or_null_property(),
+    # Heatmap-specific
+    label = class_or_null_property(LabelOption),
+    item_style = class_or_null_property(ItemStyle),
+    emphasis = S7::new_property(class = S7::class_any, default = NULL)
+  )
+)
+
+S7::method(to_list, HeatmapSeries) <- function(x, ...) {
+  out <- props_to_list(x)
+  out$type <- "heatmap"
+  if (is.list(out$data)) {
+    out$data <- unname(out$data)
+  }
+  out
+}

@@ -1,0 +1,4208 @@
+# draw.R
+# htmlwidget binding and Tier 1 draw_* functions
+
+# Constants ----
+DEFAULT_MARGINS <- c(top = 36, right = 36, bottom = 36, left = 36)
+
+# %% equal_axis_limits ----
+#' Reconcile axis limits for a square, equally-scaled plot
+#'
+#' `equal_axes` and `square` are independent statements -- one about scale, one
+#' about shape -- and each is satisfiable on its own. Asking for **both** is a
+#' statement about the *limits*: a square box in which one data unit is the same
+#' size on both axes is a box whose axes span the same interval. So that is what
+#' this produces.
+#'
+#' @details
+#' Which interval depends on what the caller already pinned down:
+#'
+#' - Neither limit given: one common interval over all the values, padded, so a
+#'   true-versus-predicted plot gets its identity line at 45 degrees without the
+#'   caller working out the range.
+#' - One given: the other matches it. The caller stated the window; both axes
+#'   use it.
+#' - Both given, spanning different intervals: an error. The caller asked for
+#'   two things that cannot both hold, and silently overriding either would
+#'   discard a choice they made explicitly.
+#'
+#' With only one of the two flags set there is nothing to reconcile and the
+#' limits pass through untouched.
+#'
+#' @param x,y Numeric: The values on each axis. `y` may be a list of series.
+#' @param xlim,ylim Optional Numeric: Author-supplied limits, length 2.
+#' @param pad Numeric `[0, Inf)`: Fraction of the range to pad a derived
+#'   interval by.
+#' @param square,equal_axes Logical: The two requests.
+#'
+#' @return Named list: `xlim` and `ylim`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+equal_axis_limits <- function(x, y, xlim, ylim, pad, square, equal_axes) {
+  if (!square || !equal_axes) {
+    return(list(xlim = xlim, ylim = ylim))
+  }
+  if (!is.null(xlim) && !is.null(ylim)) {
+    if (!isTRUE(all.equal(as.numeric(xlim), as.numeric(ylim)))) {
+      abort(
+        "`square` and `equal_axes` together require both axes to span the ",
+        "same interval, but `xlim` is [",
+        paste(xlim, collapse = ", "),
+        "] and `ylim` is [",
+        paste(ylim, collapse = ", "),
+        "]. Give them the same limits, or drop one of the two flags.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    return(list(xlim = xlim, ylim = ylim))
+  }
+  # One stated window governs both axes; with neither stated, the data does.
+  common <- xlim %||% ylim
+  if (is.null(common)) {
+    values <- c(
+      if (is.null(x)) NULL else as.numeric(x),
+      if (is.list(y)) unlist(y, use.names = FALSE) else as.numeric(y)
+    )
+    # Nothing stated and nothing to measure: resolve() is called without data
+    # too, and there is no interval to be had. Leave the limits unset.
+    if (length(values) == 0L) {
+      return(list(xlim = xlim, ylim = ylim))
+    }
+    common <- calc_limits(values, pad)
+  }
+  list(xlim = common, ylim = common)
+} # /rtemis.draw::equal_axis_limits
+
+
+# %% aspect_meta ----
+#' Derive the `aspect` render hint from a built option
+#'
+#' The pixel geometry a square or equally-scaled plot needs, read off the option
+#' that was just built rather than recomputed: the resolved axis limits and the
+#' grid margins are both already on it, and reading them is what keeps the hint
+#' and the chart from disagreeing.
+#'
+#' The ratio is the whole point. `equal_axes` wants one data unit to occupy the
+#' same number of pixels on both axes, which makes the grid's height-to-width
+#' ratio the y range over the x range. `square` wants a ratio of 1. Asked for
+#' together, `equal_axis_limits()` has already made the two spans equal, so the
+#' `equal_axes` formula yields 1 and the two agree by construction.
+#'
+#' @param option [EChartsOption]: The built option.
+#' @param square,equal_axes Logical: The two requests. With neither set there is
+#'   no hint to give and the result is an empty list.
+#'
+#' @return Named list: `aspect`, or empty.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+aspect_meta <- function(option, square = FALSE, equal_axes = FALSE) {
+  if (!square && !equal_axes) {
+    return(list())
+  }
+  x_lim <- axis_span(option@x_axis, "x", square, equal_axes)
+  y_lim <- axis_span(option@y_axis, "y", square, equal_axes)
+  # `widthPx` is deliberately absent: with no preferred width the box fills the
+  # container, and `width` on draw() is the one place to constrain it.
+  list(
+    aspect = c(
+      list(ratio = if (equal_axes) diff(y_lim) / diff(x_lim) else 1),
+      grid_px(option@grid)
+    )
+  )
+} # /rtemis.draw::aspect_meta
+
+
+# %% axis_span ----
+#' Read one axis's resolved numeric span off a built option
+#'
+#' @param axis [Axis]: The axis.
+#' @param which Character: `"x"` or `"y"`, for the error message.
+#' @param square,equal_axes Logical: Which request is being served, so the error
+#'   names the argument the caller actually passed.
+#'
+#' @return Numeric: Length-2 `c(min, max)`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+axis_span <- function(axis, which, square, equal_axes) {
+  span <- c(axis@min, axis@max)
+  if (!is.numeric(span) || length(span) != 2L || !all(is.finite(span))) {
+    abort(
+      "`",
+      if (square) "square" else "equal_axes",
+      "` needs a numeric ",
+      which,
+      " axis with known limits, and this chart's is ",
+      if (identical(axis@type, "category")) {
+        "categorical"
+      } else {
+        "unbounded"
+      },
+      ". Plot numeric values, or set `",
+      which,
+      "lim`.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  as.numeric(span)
+} # /rtemis.draw::axis_span
+
+
+# %% grid_px ----
+#' Read a grid's four margins as pixel numbers
+#'
+#' The browser solves the box from the container width, which means it has to
+#' know how much room to leave outside the grid. A margin ECharts is left to
+#' choose, or one given as a percentage, is not a number this side knows -- so
+#' rather than guess one, this says which side is the problem.
+#'
+#' @param grid Optional [Grid]: The option's grid.
+#'
+#' @return Named list: `leftPx`, `rightPx`, `topPx`, `botPx`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+grid_px <- function(grid) {
+  sides <- list(
+    leftPx = "left",
+    rightPx = "right",
+    topPx = "top",
+    botPx = "bottom"
+  )
+  out <- lapply(names(sides), function(key) {
+    value <- if (is.null(grid)) NULL else prop(grid, sides[[key]])
+    if (!is.numeric(value) || length(value) != 1L || !is.finite(value)) {
+      abort(
+        "`square` and `equal_axes` need all four margins as pixel numbers, ",
+        "and `",
+        sides[[key]],
+        "` is ",
+        if (is.null(value)) "unset" else paste0("'", value, "'"),
+        ". Pass `margins = c(top = , right = , bottom = , left = )` in pixels.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    as.numeric(value)
+  })
+  stats::setNames(out, names(sides))
+} # /rtemis.draw::grid_px
+
+
+#' Resolve a theme and create a backend widget
+#'
+#' Shared tail of every [draw()] method. Resolves the uniform `theme` argument
+#' into the `autoTheme` / `theme` / `themeDark` payload fields that every backend
+#' JS binding reads, applies the standard sizing policy, and creates the widget.
+#' Backends differ only in the `name` (which JS binding) and the `payload` they
+#' build; theme handling and sizing are identical, so they live here.
+#'
+#' @param name Character: htmlwidget name (`"rtemis-draw"`, `"rtemis-graph"`, ...).
+#' @param payload Named list: Backend-specific widget payload. The theme fields
+#'   are merged into this list.
+#' @param theme Optional [Theme], list, or `NA`: Theme override; `NULL` (default)
+#'   enables light/dark auto-detection.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit element ID.
+#' @return htmlwidget: Widget object.
+#' @keywords internal
+#' @noRd
+render_widget <- function(
+  name,
+  payload,
+  theme = NULL,
+  width = NULL,
+  height = NULL,
+  element_id = NULL
+) {
+  # Theme resolution is uniform across backends:
+  #   NA   -> no theme (raw backend defaults)
+  #   NULL -> auto-detect: send both light + dark, let JS pick by dark mode
+  #   Theme / list -> an explicit theme
+  auto_theme <- FALSE
+  theme_list <- NULL
+  theme_dark_list <- NULL
+  if (identical(theme, NA)) {
+    theme_list <- NULL
+  } else if (is.null(theme)) {
+    auto_theme <- TRUE
+    theme_list <- to_list(theme_light())
+    theme_dark_list <- to_list(theme_dark())
+  } else if (S7::S7_inherits(theme, Theme)) {
+    theme_list <- to_list(theme)
+  } else if (is.list(theme)) {
+    theme_list <- theme
+  }
+
+  # htmlwidgets serializes with `keep_vec_names = TRUE`, so a *named* palette
+  # reaches the browser as a JSON object where ECharts expects an array, and the
+  # chart renders with no colors. The palette is unnamed at every site that
+  # builds one; this is the backstop for a Theme assembled some other way.
+  theme_list[["color"]] <- palette_colors(theme_list[["color"]])
+  theme_dark_list[["color"]] <- palette_colors(theme_dark_list[["color"]])
+
+  payload <- c(
+    payload,
+    list(
+      autoTheme = if (auto_theme) TRUE else NULL,
+      theme = theme_list,
+      themeDark = theme_dark_list
+    )
+  )
+
+  # Respect explicit pixel dimensions: when a numeric width/height is given,
+  # disable browser.fill/viewer.fill so the widget keeps the computed size
+  # instead of expanding to fill the container.
+  should_fill <- is.null(width) || is.character(width)
+
+  htmlwidgets::createWidget(
+    name = name,
+    x = payload,
+    width = width,
+    height = height,
+    sizingPolicy = htmlwidgets::sizingPolicy(
+      browser.fill = should_fill,
+      browser.padding = 0,
+      viewer.fill = should_fill,
+      viewer.padding = 0,
+      fill = should_fill
+    ),
+    package = "rtemis.draw",
+    # `elementId` is htmlwidgets' own argument name and stays camelCase; ours is
+    # `element_id`. This is the only place the two meet.
+    elementId = element_id
+  )
+}
+
+#' Render a chart configuration or backend option as an htmlwidget
+#'
+#' `draw()` renders chart configurations and backend option objects as
+#' interactive visualizations. It is an 'S7' generic that dispatches on the
+#' class of `option`:
+#'
+#' - [ChartConfig] subclasses -> compile the configuration with its data, then
+#'   render using the corresponding backend.
+#' - [EChartsOption] -> 'ECharts' (`rtemis-draw` widget).
+#' - [SigmaOption] -> 'Sigma.js' (`rtemis-graph` widget).
+#' - [MapLibreOption] -> 'MapLibre' (`rtemis-map` widget).
+#'
+#' A plain named list is treated as a raw 'ECharts' option.
+#'
+#' Theme handling is uniform across backends and lives on `draw()`, not on the
+#' option object: pass `NULL` (default) for light/dark auto-detection (from VS
+#' Code, RStudio, or the browser's `prefers-color-scheme`), `NA` for no theme
+#' (raw backend defaults), or a [Theme] / list to force one.
+#'
+#' @param option [ChartConfig] subclass, [EChartsOption], [SigmaOption],
+#'   [MapLibreOption], or named list: Chart configuration or render spec to draw.
+#'   All concrete chart configuration classes listed below are supported.
+#' @param theme Optional [Theme], list, or `NA`: Theme override. `NULL` enables
+#'   light/dark auto-detection; `NA` disables theming. Applied to every backend.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit element ID.
+#' @param filename Optional Character: If provided, the widget is also written to
+#'   this file via [save_drawing()] (ECharts only; other backends reject static
+#'   export requests). Extension determines the format (currently only `.svg`).
+#' @param ... Named arguments for the selected method. For [ChartConfig]
+#'   subclasses, `data` supplies the data to plot; its required structure depends
+#'   on the configuration class. If `data` is omitted or `NULL`, the config's
+#'   `dat_path` is read instead.
+#'
+#'   Additional arguments are passed to the rendering backend. ECharts accepts
+#'   `renderer` (Character \{"canvas", "svg"\}) and `meta` (named list of extra
+#'   payload fields, used internally e.g. by [draw_heatmap()]). Any other name
+#'   is an error rather than a silent no-op, so a typo cannot quietly change
+#'   what is drawn.
+#'
+#'   Two `meta` fields are read by the ECharts JS binding and are part of its
+#'   contract, because they need the container width, which only the browser
+#'   knows:
+#'
+#'   - `squareCells`: see [draw_heatmap()].
+#'   - `aspect`: a named list with `ratio` (required grid height / grid width),
+#'     `widthPx` (preferred grid width; the box shrinks below this only when
+#'     the container is too narrow), and `leftPx`, `rightPx`, `topPx`, `botPx`
+#'     (padding to reserve outside the grid). The binding solves for the grid
+#'     box on render and on resize, and sets the container height to match.
+#'     Use it for charts whose *pixel* geometry carries meaning -- most often
+#'     equal axis scaling, where one data unit must be the same number of
+#'     pixels on both axes and `ratio` is therefore the y range over the
+#'     x range. ECharts has no equal-aspect option, and R cannot know the
+#'     container width, so neither side can enforce this alone.
+#' @param animation Optional Logical: Whether ECharts animates the chart.
+#'   `NULL` (default) leaves ECharts' own default in place. `FALSE` disables
+#'   animation, which matters for charts with many points, where animating
+#'   every interactive update is expensive. Ignored by the Sigma and MapLibre
+#'   backends, which have no ECharts animation to disable.
+#' @return htmlwidget: Widget object.
+#' @export
+#'
+#' @section Chart configurations:
+#' Supported [ChartConfig] subclasses are [A3Config], [BarConfig],
+#' [BoxplotConfig], [CalibrationConfig], [ChoroplethConfig], [ConfusionConfig],
+#' [DensityConfig], [GanttConfig], [HeatmapConfig], [HistogramConfig],
+#' [LineConfig], [NetworkConfig], [PieConfig], [ROCConfig], [SankeyConfig],
+#' [ScatterConfig], [Scatter3DConfig], [SignificanceConfig], [SpectrogramConfig],
+#' [SurvivalConfig], and [TimeSeriesConfig]. Use their `setup_*()` functions to
+#' create configurations, then pass the data to `draw()` with `data =` or set
+#' `dat_path` on the configuration. See [compile()] to obtain the backend option
+#' without rendering it.
+#'
+#' @examples
+#' # Render a chart configuration with data.
+#' config <- setup_ScatterConfig(x = "wt", y = "mpg")
+#' draw(config, data = mtcars)
+#'
+#' # Render a backend option directly.
+#' option <- EChartsOption(
+#'   x_axis = Axis(type = "category", data = c("Mon", "Tue", "Wed")),
+#'   y_axis = Axis(type = "value"),
+#'   series = BarSeries(data = c(120, 200, 150))
+#' )
+#' draw(option)
+draw <- S7::new_generic(
+  "draw",
+  "option",
+  function(
+    option,
+    theme = NULL,
+    width = NULL,
+    height = NULL,
+    element_id = NULL,
+    filename = NULL,
+    animation = NULL,
+    ...
+  ) {
+    S7::S7_dispatch()
+  }
+)
+
+#' Render an ECharts option (already a plain list) as an htmlwidget
+#'
+#' Internal worker shared by the [EChartsOption] and bare-list [draw()] methods.
+#' Holds all ECharts-specific option post-processing (legend auto-add, empty-
+#' object fix, axis tick hiding, grid outer-bounds), then hands off to
+#' `render_widget()`.
+#'
+#' @param option Named list: ECharts option (already converted from S7).
+#' @param renderer Character \{"canvas", "svg"\}: Rendering engine.
+#' @param theme,width,height,element_id,filename,animation See [draw()].
+#' @param meta Named list: Extra fields merged into the widget payload.
+#' @return htmlwidget: Widget object.
+#' @keywords internal
+#' @noRd
+draw_echarts_option <- function(
+  option,
+  renderer = "canvas",
+  theme = NULL,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  animation = NULL,
+  meta = list()
+) {
+  # Animation is a *render* concern, not a fact about the chart: the same chart
+  # animates in an IDE pane and should not in a web canvas redrawing 100k points
+  # on every interaction. So it is set here, on the way out, rather than being a
+  # config property. NULL leaves whatever the option already carries, which is
+  # ECharts' own default.
+  if (!is.null(animation)) {
+    option[["animation"]] <- animation
+  }
+  # Auto-add legend when multiple distinctly named series are present
+  if (
+    is.null(option$legend) &&
+      is.list(option$series) &&
+      length(option$series) > 1L
+  ) {
+    series_names <- vapply(
+      option$series,
+      function(s) s$name %||% "",
+      character(1)
+    )
+    if (length(unique(series_names[series_names != ""])) > 1L) {
+      option$legend <- list()
+    }
+  }
+
+  # Ensure empty S7-derived lists serialize as JSON objects {} not arrays [].
+  # props_to_list() returns list() (unnamed) for objects with all-NULL
+  # properties (e.g. Legend(), AreaStyle()). jsonlite serializes unnamed
+  # list() as [] but named list() as {}. ECharts requires {}.
+  fix_empty_objects <- function(x) {
+    if (is.list(x)) {
+      if (length(x) == 0L && is.null(names(x))) {
+        return(stats::setNames(list(), character(0)))
+      }
+      x[] <- lapply(x, fix_empty_objects)
+    }
+    x
+  }
+  option <- fix_empty_objects(option)
+
+  # Hide default axis tick marks for a clean look
+  for (axis_key in c("xAxis", "yAxis")) {
+    ax <- option[[axis_key]]
+    if (!is.null(ax)) {
+      if (is.null(names(ax))) {
+        # Array of axis configs (e.g. dual y-axes)
+        for (i in seq_along(ax)) {
+          if (is.null(ax[[i]]$axisTick)) {
+            ax[[i]]$axisTick <- list()
+          }
+          ax[[i]]$axisTick$show <- FALSE
+        }
+      } else {
+        # Single axis config
+        if (is.null(ax$axisTick)) {
+          ax$axisTick <- list()
+        }
+        ax$axisTick$show <- FALSE
+      }
+      option[[axis_key]] <- ax
+    }
+  }
+
+  # Default grid: echarts 6's outerBoundsMode = "same" makes the grid rect
+  # (left/right/top/bottom) the *outer* bounds — axis labels and names must fit
+  # inside, so the grid auto-shrinks to contain them. This replaces the
+  # deprecated `containLabel = TRUE` and yields tighter margins with no dead
+  # space on the sides.
+  #
+  # When a user-supplied grid is already present (e.g. via `margins`), we still
+  # inject `outerBoundsMode = "same"` so that unspecified sides auto-fit — but
+  # skip when `containLabel` is set explicitly (heatmap uses `containLabel =
+  # FALSE` for exact pixel margins).
+  if (!is.null(option$xAxis) || !is.null(option$yAxis)) {
+    # ECharts 6.1's `outerBoundsContain` decides whether a grid's outer bounds
+    # reserve room for the axis *name* ("all") or only the tick labels
+    # ("axisLabel"). Using "axisLabel" when no axis name is shown avoids a dead
+    # gap below the labels. Mirrors rtemislive's chartOptionBuilder.ts.
+    has_axis_name <- function(axis) {
+      if (is.null(axis)) {
+        return(FALSE)
+      }
+      axes <- if (is.null(names(axis))) axis else list(axis)
+      any(vapply(
+        axes,
+        function(a) {
+          nm <- a[["name"]]
+          is.character(nm) && length(nm) == 1L && nzchar(nm)
+        },
+        logical(1L)
+      ))
+    }
+    outer_contain <- if (
+      has_axis_name(option$xAxis) || has_axis_name(option$yAxis)
+    ) {
+      "all"
+    } else {
+      "axisLabel"
+    }
+    inject_obm <- function(g) {
+      if (is.null(g[["containLabel"]])) {
+        if (is.null(g[["outerBoundsMode"]])) {
+          g[["outerBoundsMode"]] <- "same"
+        }
+        if (is.null(g[["outerBoundsContain"]])) {
+          g[["outerBoundsContain"]] <- outer_contain
+        }
+      }
+      g
+    }
+    if (is.null(option$grid)) {
+      option$grid <- inject_obm(list())
+    } else if (is.list(option$grid) && !is.null(names(option$grid))) {
+      # Single grid (named list).
+      option$grid <- inject_obm(option$grid)
+    } else if (is.list(option$grid)) {
+      # List of grids.
+      option$grid <- lapply(option$grid, inject_obm)
+    }
+  }
+
+  payload <- c(
+    list(
+      option = option,
+      renderer = renderer
+    ),
+    meta
+  )
+
+  widget <- render_widget(
+    "rtemis-draw",
+    payload,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id
+  )
+
+  if (!is.null(option[["grid3D"]])) {
+    widget[["dependencies"]] <- c(
+      widget[["dependencies"]],
+      list(
+        htmltools::htmlDependency(
+          "echarts-gl",
+          "2.1.0",
+          src = system.file(
+            "htmlwidgets/lib/echarts-gl",
+            package = "rtemis.draw"
+          ),
+          script = "echarts-gl.min.js"
+        )
+      )
+    )
+  }
+  if (!is.null(filename)) {
+    save_drawing(widget, filename)
+  }
+
+  widget
+}
+
+# ECharts backend: convert the option object to a list, then render.
+S7::method(draw, EChartsOption) <- function(
+  option,
+  theme = NULL,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  animation = NULL,
+  ...,
+  renderer = "canvas",
+  meta = list()
+) {
+  check_dots_empty(...)
+  draw_echarts_option(
+    to_list(option),
+    renderer = renderer,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    animation = animation,
+    meta = meta
+  )
+}
+
+# A bare named list is treated as a raw ECharts option (back-compat with the
+# original list-accepting `draw()`).
+S7::method(draw, S7::class_list) <- function(
+  option,
+  theme = NULL,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  animation = NULL,
+  ...,
+  renderer = "canvas",
+  meta = list()
+) {
+  check_dots_empty(...)
+  draw_echarts_option(
+    option,
+    renderer = renderer,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    animation = animation,
+    meta = meta
+  )
+}
+
+#' Shiny output for draw widget
+#' @param outputId Character: Shiny output ID.
+#' @param width Character or Numeric: CSS width.
+#' @param height Character or Numeric: CSS height.
+#'
+#' @return Shiny output element for a draw widget.
+#'
+#' @export
+#'
+#' @examples
+#' if (requireNamespace("shiny", quietly = TRUE)) {
+#'   drawOutput("chart", height = "600px")
+#' }
+drawOutput <- function(outputId, width = "100%", height = "400px") {
+  htmlwidgets::shinyWidgetOutput(
+    outputId,
+    "rtemis-draw",
+    width = width,
+    height = height,
+    package = "rtemis.draw"
+  )
+}
+
+#' Shiny render function for draw widget
+#' @param expr Expression: Expression that returns a draw widget.
+#' @param env Environment: Evaluation environment.
+#' @param quoted Logical: Whether `expr` is quoted.
+#'
+#' @return Shiny render function for a draw widget.
+#'
+#' @export
+#'
+#' @examples
+#' if (requireNamespace("shiny", quietly = TRUE)) {
+#'   renderDraw(draw_bar(x = c("A", "B", "C"), y = c(3, 7, 2)))
+#' }
+renderDraw <- function(expr, env = parent.frame(), quoted = FALSE) {
+  if (!quoted) {
+    expr <- substitute(expr)
+  }
+  htmlwidgets::shinyRenderWidget(expr, drawOutput, env, quoted = TRUE)
+}
+
+# -- Tier 1: draw_* convenience functions ---------------------------------------
+
+#' Epoch milliseconds for a time axis, keeping the wall-clock reading
+#'
+#' ECharts places and labels a time axis by epoch milliseconds, formatted in
+#' the browser's timezone unless the option sets `useUTC`. A chart built in
+#' one timezone and viewed in another would then move every point: a date at
+#' midnight, sent as the instant it names, reads as the previous evening on a
+#' browser west of it. So the value sent is the instant whose *UTC* reading is
+#' the timestamp's own wall-clock reading, and the option sets `useUTC`, which
+#' together render the timestamp exactly as R prints it wherever it is viewed.
+#'
+#' A `Date` is a count of days from the epoch and needs no timezone at all.
+#' A `POSIXct` is formatted in its own timezone and re-read as UTC.
+#'
+#' @param x Date, POSIXct, or Numeric: Time values, or milliseconds already.
+#'
+#' @return Numeric: Epoch milliseconds, `NA` where `x` is.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+time_axis_ms <- function(x) {
+  if (inherits(x, "Date")) {
+    return(as.numeric(x) * 86400000)
+  }
+  if (inherits(x, "POSIXt")) {
+    wall <- format(x, "%Y-%m-%d %H:%M:%OS6")
+    utc <- as.POSIXct(wall, tz = "UTC", format = "%Y-%m-%d %H:%M:%OS")
+    return(round(as.numeric(utc) * 1000))
+  }
+  as.numeric(x)
+} # /rtemis.draw::time_axis_ms
+
+
+#' Is a vector a time for a line chart's x axis?
+#'
+#' @param x Vector: The candidate.
+#'
+#' @return Logical: TRUE for `Date` and `POSIXt`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+is_time_axis <- function(x) {
+  inherits(x, c("Date", "POSIXt"))
+} # /rtemis.draw::is_time_axis
+
+
+#' Make room under the plot for the zoom slider
+#'
+#' ECharts lays its slider a fixed distance above the container's bottom edge,
+#' where the x-axis title and the legend already sit, and reserves no grid
+#' space for it. This moves the slider up to the top of the bottom margin --
+#' above the legend, which lives in that margin -- and grows the margin so the
+#' axis labels and title clear the slider.
+#'
+#' Only the preset built by `zoom = TRUE` is placed: a caller who passes
+#' [DataZoom] objects has taken over the layout. A percentage bottom margin is
+#' left alone too, since the slider's height is in pixels.
+#'
+#' @param data_zoom List of [DataZoom]: The resolved zoom specs.
+#' @param grid Optional [Grid]: The resolved margins.
+#'
+#' @return Named list: `data_zoom` and `grid`, placed.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+reserve_slider_room <- function(data_zoom, grid) {
+  # ECharts' own numbers: the slider's filler height, the brush handle it
+  # draws below the filler, and its default grid margin when none is given.
+  slider_height <- 30
+  handle_height <- 7
+  gap <- 8
+  bottom <- if (is.null(grid) || is.null(grid@bottom)) 80 else grid@bottom
+  if (!is.numeric(bottom)) {
+    return(list(data_zoom = data_zoom, grid = grid))
+  }
+  data_zoom <- lapply(data_zoom, function(dz) {
+    if (S7::S7_inherits(dz, DataZoom) && identical(dz@type, "slider")) {
+      dz@bottom <- bottom + handle_height
+      dz@height <- slider_height
+    }
+    dz
+  })
+  grid <- grid %||% Grid()
+  grid@bottom <- bottom + handle_height + slider_height + gap
+  list(data_zoom = data_zoom, grid = grid)
+} # /rtemis.draw::reserve_slider_room
+
+
+#' Tooltip value formatter for plain numbers
+#'
+#' Formats the value part of a tooltip row while leaving ECharts' own layout
+#' -- axis label header, series marker and name, right-aligned value -- in
+#' place. Integers print as they are; other numbers to two decimals, or in
+#' exponent form when they are very large or very small; anything that is not
+#' a finite number passes through.
+#'
+#' @return `JS` function: For `Tooltip(value_formatter = )`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+number_value_formatter <- function() {
+  htmlwidgets::JS(
+    "function (v) {
+      if (typeof v !== 'number' || !isFinite(v)) return v;
+      if (Number.isInteger(v)) return String(v);
+      var a = Math.abs(v);
+      if (a >= 1e6 || a < 0.01) return v.toExponential(2);
+      return v.toFixed(2);
+    }"
+  )
+} # /rtemis.draw::number_value_formatter
+
+
+#' Build the ECharts option for a line chart
+#'
+#' The single implementation shared by [draw_line()], which resolves its arguments
+#' from vectors, and `compile()` on the corresponding [ChartConfig], which
+#' resolves them from a data frame. The render targets stay with the caller.
+#'
+#' @inheritParams draw_line
+#'
+#' @return [EChartsOption]: The option object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+line_option <- function(
+  x,
+  y,
+  names = NULL,
+  group = NULL,
+  smooth = FALSE,
+  area = FALSE,
+  points = TRUE,
+  blocks = NULL,
+  block_color = NULL,
+  block_opacity = 0.2,
+  palette = NULL,
+  line_style = NULL,
+  pad = DEFAULT_PAD,
+  xlim = NULL,
+  ylim = NULL,
+  square = FALSE,
+  equal_axes = FALSE,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  zoom = FALSE,
+  margins = DEFAULT_MARGINS
+) {
+  # Determine axis type: numbers get a value axis, dates and date-times a
+  # time axis, which ECharts spaces by elapsed time and labels adaptively
+  # (years, then months, then days as the span narrows). Anything else is a
+  # category axis with one slot per distinct value.
+  x_type <- if (is.numeric(x)) {
+    "value"
+  } else if (is_time_axis(x)) {
+    "time"
+  } else {
+    "category"
+  }
+
+  # On a time axis, positions are epoch milliseconds (see time_axis_ms()),
+  # and `xlim` may be given as dates, date-times, or milliseconds.
+  x_num <- switch(x_type, value = x, time = time_axis_ms(x), category = NULL)
+  if (x_type == "time" && !is.null(xlim)) {
+    xlim <- time_axis_ms(xlim)
+  }
+  validate_axis_lim(xlim, "xlim")
+  validate_axis_lim(ylim, "ylim")
+
+  # `xlim` only makes sense on an axis with a numeric position.
+  if (!is.null(xlim) && x_type == "category") {
+    abort(
+      "`xlim` only applies when `x` is numeric or a date.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (equal_axes && x_type != "value") {
+    abort(
+      "`equal_axes` compares the two axes' scales, which needs a numeric x. ",
+      "This chart's x is ",
+      if (x_type == "time") "a date or time." else "categorical.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  # Asking for a square box *and* equal scaling is a statement about the limits;
+  # settle them before anything reads them.
+  limits <- equal_axis_limits(x_num, y, xlim, ylim, pad, square, equal_axes)
+  xlim <- limits[["xlim"]]
+  ylim <- limits[["ylim"]]
+
+  # Resolve axis limits, extended by `pad` as on every other value axis. This
+  # used to be the exact data range, which put the first and last points hard
+  # against the plot edges while a scatter of the same data got 4% of room --
+  # two charts disagreeing about the same question.
+  y_all <- if (is.list(y)) unlist(y, use.names = FALSE) else y
+  x_lim <- if (!is.null(x_num)) (xlim %||% calc_limits(x_num, pad)) else NULL
+  y_lim <- ylim %||% calc_limits(y_all, pad)
+
+  # The categories of a category axis, each listed once. Ungrouped data lists
+  # them once already; grouped data repeats them once per level.
+  x_categories <- if (x_type == "category") unique(x) else NULL
+
+  # Format series data: value and time axes need [x, y] pairs; category axes
+  # need y only when every series covers every category in order (the
+  # ungrouped case), and [index, y] pairs when a series covers a subset (the
+  # grouped case). The index is the category's 0-based position on the axis,
+  # which ECharts accepts in place of its name. Matching by name would need
+  # the name spelled the same way here and by the JSON serializer, and for a
+  # factor or other formatted value that is not guaranteed.
+  pair_xy <- function(y_vals, x_vals = x_num, pair_category = FALSE) {
+    if (x_type != "category") {
+      mapply(c, x_vals, y_vals, SIMPLIFY = FALSE, USE.NAMES = FALSE)
+    } else if (pair_category) {
+      mapply(
+        c,
+        match(x_vals, x_categories) - 1L,
+        y_vals,
+        SIMPLIFY = FALSE,
+        USE.NAMES = FALSE
+      )
+    } else {
+      y_vals
+    }
+  }
+
+  check_logical_scalar(points)
+  # ECharts treats missing `showSymbol` as TRUE; only pass FALSE when hiding.
+  show_symbol <- if (points) NULL else FALSE
+
+  valid_line_styles <- c("solid", "dashed", "dotted")
+  if (!is.null(line_style)) {
+    if (
+      !is.character(line_style) ||
+        any(!line_style %in% valid_line_styles)
+    ) {
+      abort(
+        "`line_style` must be NULL or a character vector of ",
+        "'solid', 'dashed', or 'dotted'.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+  }
+  # Returns a LineStyle for series i, recycling line_style; NULL if unset.
+  resolve_line_style <- function(i) {
+    if (is.null(line_style)) {
+      return(NULL)
+    }
+    n <- length(line_style)
+    LineStyle(type = line_style[((i - 1L) %% n) + 1L])
+  }
+
+  # Build series. `group` splits a single `y` into one line per level, the way
+  # draw_scatter() splits points; a list `y` is already multi-series, so the
+  # two do not combine.
+  if (!is.null(group)) {
+    if (is.list(y)) {
+      abort(
+        "`group` splits a single `y` vector into one series per level; ",
+        "pass `y` as a list *or* set `group`, not both.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    group <- group_values(group, length(y))
+    # `blocks` is read along `x`, and with `group` each x repeats once per
+    # level, so the same run would be shaded once per group.
+    if (!is.null(blocks)) {
+      abort(
+        "`blocks` is not supported together with `group`.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    # Points with a missing group belong to no line.
+    groups <- unique(group[!is.na(group)])
+    series <- lapply(seq_along(groups), function(i) {
+      idx <- which(!is.na(group) & group == groups[[i]])
+      LineSeries(
+        name = as.character(groups[[i]]),
+        data = pair_xy(
+          y[idx],
+          x_vals = if (x_type == "category") x[idx] else x_num[idx],
+          pair_category = TRUE
+        ),
+        smooth = smooth,
+        show_symbol = show_symbol,
+        line_style = resolve_line_style(i),
+        area_style = if (area) AreaStyle() else NULL
+      )
+    })
+  } else if (is.list(y) && !is.null(names(y))) {
+    series_names <- names(y)
+    series <- lapply(seq_along(y), function(i) {
+      LineSeries(
+        name = series_names[i],
+        data = pair_xy(y[[i]]),
+        smooth = smooth,
+        show_symbol = show_symbol,
+        line_style = resolve_line_style(i),
+        area_style = if (area) AreaStyle() else NULL
+      )
+    })
+  } else if (is.list(y)) {
+    series_names <- names %||% paste0("Series ", seq_along(y))
+    series <- lapply(seq_along(y), function(i) {
+      LineSeries(
+        name = series_names[i],
+        data = pair_xy(y[[i]]),
+        smooth = smooth,
+        show_symbol = show_symbol,
+        line_style = resolve_line_style(i),
+        area_style = if (area) AreaStyle() else NULL
+      )
+    })
+  } else {
+    series <- list(LineSeries(
+      data = pair_xy(y),
+      smooth = smooth,
+      show_symbol = show_symbol,
+      line_style = resolve_line_style(1L),
+      area_style = if (area) AreaStyle() else NULL
+    ))
+  }
+
+  # Optional vertical background bands from `blocks` + `block_color`.
+  if (!is.null(blocks)) {
+    mark_area <- build_block_mark_area(
+      x = x_num %||% x,
+      blocks = blocks,
+      block_color = block_color,
+      block_opacity = block_opacity
+    )
+    if (!is.null(mark_area)) {
+      series[[1]]@mark_area <- mark_area
+    }
+  }
+
+  # Resolve `zoom` argument into an (optional) list of DataZoom specs. The
+  # `TRUE` preset's slider is given its own band under the plot.
+  data_zoom <- resolve_zoom(zoom, axis = "x")
+  grid <- resolve_margins(margins)
+  if (isTRUE(zoom)) {
+    placed <- reserve_slider_room(data_zoom, grid)
+    data_zoom <- placed[["data_zoom"]]
+    grid <- placed[["grid"]]
+  }
+
+  opt <- EChartsOption(
+    title = if (!is.null(title)) Title(text = title) else NULL,
+    tooltip = Tooltip(
+      trigger = "axis",
+      value_formatter = number_value_formatter()
+    ),
+    legend = if (length(series) > 1L || !is.null(group)) Legend() else NULL,
+    x_axis = Axis(
+      type = x_type,
+      name = xlab,
+      name_location = if (!is.null(xlab)) "middle" else NULL,
+      data = x_categories,
+      scale = if (x_type == "value") TRUE else NULL,
+      min = if (!is.null(x_lim)) x_lim[[1L]] else NULL,
+      max = if (!is.null(x_lim)) x_lim[[2L]] else NULL,
+      split_line = if (x_type != "category") no_corner_split_line() else NULL,
+      axis_label = if (x_type != "category") no_corner_axis_label() else NULL,
+      # Category axes also fall back to a nonzero range edge when zero is
+      # absent. Apply the same zero-only emphasis as continuous axes.
+      axis_line = axis_line_for_orthogonal(y_lim)
+    ),
+    y_axis = Axis(
+      type = "value",
+      name = ylab,
+      name_location = if (!is.null(ylab)) "middle" else NULL,
+      scale = TRUE,
+      min = y_lim[[1L]],
+      max = y_lim[[2L]],
+      split_line = no_corner_split_line(),
+      axis_label = no_corner_axis_label(),
+      axis_line = axis_line_for_orthogonal(x_lim)
+    ),
+    color = palette,
+    data_zoom = data_zoom,
+    grid = grid,
+    # Time positions carry the wall-clock reading as UTC; see time_axis_ms().
+    use_utc = if (x_type == "time") TRUE else NULL,
+    series = series
+  )
+
+  opt
+} # /rtemis.draw::line_option
+
+
+#' Draw a Line Chart
+#'
+#' Quick line chart from x/y data.
+#'
+#' @param legend_position Character \{"top", "bottom", "left", "right",
+#'   "top-left", "top-right", "bottom-left", "bottom-right"\}: Legend anchor.
+#'   Top/bottom anchors use horizontal rows; left/right anchors use a vertical
+#'   column. Corner anchors align within the top or bottom row.
+#' @param legend_placement Character \{"outside", "inside"\}: Relation to the
+#'   plotting area. Outside placement reserves space for the complete legend;
+#'   inside placement overlays the data. Neither setting adds a missing legend.
+#'
+#' @details
+#' Axis baselines emphasize zero only when it is in the visible orthogonal
+#' range. Categorical x axes follow the same rule as numeric and time axes.
+#'
+#' # Square and equally-scaled plots
+#'
+#' `square` and `equal_axes` are separate requests. `square` is about the
+#' *shape* of the plotting box: equal height and width in pixels, measured on
+#' the box itself, not including axis labels or margins. `equal_axes` is about
+#' *scale*: one data unit occupies the same number of pixels on both axes, so a
+#' 45-degree line really is a slope of 1.
+#'
+#' Either works alone. `equal_axes` on a chart whose x spans ten units and whose
+#' y spans one gives a wide, short box, which is what equal scaling means there.
+#'
+#' Asking for both is a statement about the limits, since the only square box in
+#' which both axes are equally scaled is one whose axes span the same interval.
+#' So both axes are made to span one interval: over all the values when neither
+#' limit was given, or the one you gave when you gave exactly one. Giving both
+#' `xlim` and `ylim` as different intervals is an error rather than a silent
+#' override.
+#'
+#' The box itself is solved in the browser, which is the only side that knows
+#' how wide the container is, and re-solved whenever it resizes.
+#'
+#' @param x Vector: X-axis values. Numeric values get a value axis. `Date`
+#'   and `POSIXct` values get a time axis: points are spaced by elapsed time
+#'   and the labels are chosen adaptively for the span shown (years, then
+#'   months, then days, down to seconds), and they read as the timestamps do
+#'   in R whatever timezone the chart is viewed in. Anything else gets a
+#'   category axis with one slot per distinct value, in order of appearance.
+#' @param y Numeric or named list: Y values.
+#' @param names Optional Character: Series names used when `y` is an unnamed list.
+#' @param group Optional Atomic vector or single-column data frame: Grouping
+#'   variable, one value per point. Splits a single `y` vector into one line per level, named by the level, as
+#'   [draw_scatter()] does for points. Cannot be combined with a list `y` or
+#'   with `blocks`. Points whose group is `NA` are dropped.
+#' @param smooth Logical: Whether to smooth lines.
+#' @param area Logical: Whether to show area fill.
+#' @param points Logical: Whether to show point markers on each data value.
+#'   Defaults to `TRUE`; set to `FALSE` on long time-series where the symbols
+#'   add visual noise.
+#' @param blocks Optional factor, integer, character, or logical of length
+#'   `length(x)`: Per-x-value group label used to shade vertical background
+#'   bands. Contiguous runs of the same level become one band. `NA` entries
+#'   produce no band.
+#' @param block_color Optional Character vector or list of length k, where
+#'   k is the number of unique levels in `blocks`: Fill color for each level.
+#'   Match by name to factor levels if named, else positional. `NA`, `NULL`,
+#'   or `"transparent"` entries skip that level.
+#' @param block_opacity Numeric \[0, 1\]: Fill opacity applied to all bands.
+#'   Defaults to `0.2`.
+#' @param palette Optional Character: Series color palette — a single color string or
+#'   character vector that overrides the theme palette for this chart.
+#'   `color` takes precedence over the theme palette (it sets `option.color`).
+#' @param line_style Optional Character \{"solid", "dashed", "dotted"\}: Line dash
+#'   style — one value per series, recycled to match the number of series.
+#' @param xlim Optional Numeric, Date, or POSIXct \[length 2\]: X-axis limits
+#'   `c(min, max)`. Only supported when `x` is numeric or a time; passing
+#'   `xlim` with a categorical `x` errors. On a time axis, give it in the same
+#'   class as `x` (or as epoch milliseconds). Defaults to the range of `x`
+#'   extended by `pad`.
+#' @param ylim Optional Numeric \[length 2\]: Y-axis limits `c(min, max)`.
+#' @param pad Numeric `[0, Inf)`: Fraction of the data range to extend each
+#'   axis by when `xlim` / `ylim` are not given. The default matches base R's
+#'   `xaxs = "r"`, which extends the range by 4% at each end.
+#'   Defaults to the range of all `y` values across series (no padding).
+#' @param square Logical: If TRUE, draw the plotting box square -- equal height
+#'   and width in pixels, excluding axis labels and margins.
+#' @param equal_axes Logical: If TRUE, give one data unit the same size in
+#'   pixels on both axes. Set both for a plot that is square *and* to scale,
+#'   such as an ROC curve; the two axes are then made to span the same
+#'   interval. Requires a numeric `x`. See Details.
+#' @param xlab Optional Character: X-axis title.
+#' @param ylab Optional Character: Y-axis title.
+#' @param title Optional Character: Chart title.
+#' @param theme Optional [Theme]: Theme override. The palette inside the theme can be
+#'   overridden per-chart with the `color` argument.
+#' @param zoom Logical, [DataZoom], or list of [DataZoom]: Enable x-axis zoom.
+#'   `TRUE` adds a slider plus mouse-wheel/drag zoom on the x-axis, with the
+#'   slider given its own band below the axis title; `FALSE` (default)
+#'   disables zoom. Pass [DataZoom] objects (or a list of them) for full
+#'   control over zoom behavior, styling, and placement.
+#' @param margins Optional Named numeric vector or named list: Plot margins in
+#'   pixels (or percentage strings) for any of `"top"`, `"right"`,
+#'   `"bottom"`, `"left"` — e.g. `c(left = 80, right = 20)` or
+#'   `list(left = 80, right = "10%")`. Unspecified sides keep echarts' default
+#'   auto-sizing (`outerBoundsMode = "same"`), which shrinks the grid to fit
+#'   axis labels and names with no dead space.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit DOM element ID for the widget
+#'   container. `NULL` lets htmlwidgets generate one.
+#' @param filename Optional Character: If provided, save the widget to this file via
+#'   [save_drawing()].
+#' @return htmlwidget: Widget object.
+#'
+#' @examples
+#' # An ROC curve is square by nature, on axes that share their [0, 1] range.
+#' draw_line(
+#'   x = c(0, 0.2, 0.6, 1),
+#'   y = c(0, 0.55, 0.85, 1),
+#'   square = TRUE,
+#'   equal_axes = TRUE,
+#'   xlab = "False positive rate",
+#'   ylab = "True positive rate"
+#' )
+#'
+#' @export
+draw_line <- function(
+  x,
+  y,
+  names = NULL,
+  group = NULL,
+  smooth = FALSE,
+  area = FALSE,
+  points = TRUE,
+  blocks = NULL,
+  block_color = NULL,
+  block_opacity = 0.2,
+  palette = NULL,
+  line_style = NULL,
+  pad = DEFAULT_PAD,
+  xlim = NULL,
+  ylim = NULL,
+  square = FALSE,
+  equal_axes = FALSE,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  theme = NULL,
+  zoom = FALSE,
+  margins = DEFAULT_MARGINS,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  legend_position = "top",
+  legend_placement = "outside"
+) {
+  opt <- line_option(
+    x = x,
+    y = y,
+    names = names,
+    group = group,
+    smooth = smooth,
+    area = area,
+    points = points,
+    blocks = blocks,
+    block_color = block_color,
+    block_opacity = block_opacity,
+    palette = palette,
+    line_style = line_style,
+    pad = pad,
+    xlim = xlim,
+    ylim = ylim,
+    square = square,
+    equal_axes = equal_axes,
+    xlab = xlab,
+    ylab = ylab,
+    title = title,
+    zoom = zoom,
+    margins = margins
+  )
+
+  draw(
+    opt,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    meta = c(
+      legend_meta(legend_position, legend_placement),
+      aspect_meta(opt, square = square, equal_axes = equal_axes)
+    )
+  )
+}
+
+#' Default split-line configuration suppressing corner grid lines
+#'
+#' Returns a [SplitLine] with `show_min_line = FALSE` and `show_max_line = FALSE`
+#' so the first and last split lines (which sit on the plot border) are not
+#' drawn. Used as the default for value axes in `draw_line` and `draw_scatter`.
+#'
+#' @return [SplitLine]: Split-line configuration.
+#' @keywords internal
+#' @noRd
+no_corner_split_line <- function() {
+  SplitLine(show_min_line = FALSE, show_max_line = FALSE)
+}
+
+#' Default axis-label configuration suppressing min/max endpoint labels
+#'
+#' Returns an [AxisLabel] with `show_min_label = FALSE` and `show_max_label = FALSE`
+#' so echarts does not render unrounded endpoint labels (e.g. `0.64`, `30.36`)
+#' that arise when `min`/`max` are pinned to padded data ranges. Used as the
+#' default for value axes in `draw_line` and `draw_scatter`.
+#'
+#' @return [AxisLabel]: Axis-label configuration.
+#' @keywords internal
+#' @noRd
+no_corner_axis_label <- function() {
+  AxisLabel(show_min_label = FALSE, show_max_label = FALSE)
+}
+
+#' Axis line configuration emphasizing zero only when zero is visible
+#'
+#' Returns an [AxisLine] with `on_zero = TRUE` (so the axis sits at 0 of the
+#' orthogonal axis when possible) and `show` gated on whether 0 is inside the
+#' orthogonal range:
+#'   - `show = TRUE` when `0 ∈ ortho_lim` — the axis line is drawn at the
+#'     zero position, giving the "bold zero line" effect;
+#'   - `show = FALSE` otherwise — echarts would otherwise fall back to the
+#'     lowest orthogonal value and draw an unwanted emphasis line at the plot
+#'     edge, which we suppress entirely.
+#'
+#' Returns `NULL` when `ortho_lim` is `NULL` (e.g. category orthogonal axis) to
+#' leave echarts' default behavior in place.
+#'
+#' @param ortho_lim Optional Numeric \[length 2\]: `c(min, max)` of the
+#'   *orthogonal* axis — for an x-axis config this is the y-axis limits, and
+#'   vice versa.
+#' @return Optional [AxisLine]: Axis-line configuration.
+#' @keywords internal
+#' @noRd
+axis_line_for_orthogonal <- function(ortho_lim) {
+  if (is.null(ortho_lim)) {
+    return(NULL)
+  }
+  zero_in_range <- ortho_lim[[1L]] <= 0 && ortho_lim[[2L]] >= 0
+  AxisLine(show = zero_in_range, on_zero = TRUE)
+}
+
+#' Build a `MarkArea` from `blocks` + `block_color` arguments
+#'
+#' Run-length-encodes `blocks` along `x` and produces one [MarkAreaDataPoint]
+#' pair per contiguous run whose level has a drawable color. Levels whose
+#' color is `NA`, `NULL`, or `"transparent"` are skipped.
+#'
+#' @param x Vector: X-axis values (numeric or character).
+#' @param blocks Atomic vector of length `length(x)`: Per-x-value group label.
+#'   `NA` entries break runs and produce no band.
+#' @param block_color Character vector or list, length equal to the number of
+#'   unique levels in `blocks`: Color per level. If named, matched to level
+#'   names; else positional (factor levels for factors, `sort(unique(...))`
+#'   otherwise).
+#' @param block_opacity Numeric \[0, 1\]: Fill opacity applied via ItemStyle.
+#' @return Optional [MarkArea]: `MarkArea` object, or `NULL` if there are no
+#'   bands to draw.
+#' @keywords internal
+#' @noRd
+build_block_mark_area <- function(x, blocks, block_color, block_opacity) {
+  if (length(blocks) != length(x)) {
+    abort(
+      "`blocks` must have the same length as `x` (",
+      length(x),
+      "); got ",
+      length(blocks),
+      ".",
+      class = c("rtemis_dim_error", "rtemis_input_error")
+    )
+  }
+  if (!is.atomic(blocks)) {
+    abort(
+      "`blocks` must be an atomic vector (factor, integer, character, or logical).",
+      class = c("rtemis_type_error", "rtemis_input_error")
+    )
+  }
+  if (is.null(block_color)) {
+    abort(
+      "`block_color` must be provided when `blocks` is set.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  check_prob_scalar(block_opacity)
+
+  # Determine level order so positional matching is stable. For factors, drop
+  # unused levels so `block_color` doesn't need entries for absent categories.
+  levels_vec <- if (is.factor(blocks)) {
+    levels(droplevels(blocks))
+  } else {
+    sort(unique(blocks[!is.na(blocks)]))
+  }
+  k <- length(levels_vec)
+  as_key <- function(v) as.character(v)
+  level_keys <- as_key(levels_vec)
+
+  # Resolve color-per-level lookup.
+  bc_names <- names(block_color)
+  if (!is.null(bc_names) && !any(bc_names == "")) {
+    missing_levels <- setdiff(level_keys, bc_names)
+    if (length(missing_levels) > 0L) {
+      abort(
+        "`block_color` is missing entries for: ",
+        paste(missing_levels, collapse = ", "),
+        ".",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    color_for <- function(lvl) block_color[[as_key(lvl)]]
+  } else {
+    if (length(block_color) != k) {
+      abort(
+        "`block_color` must have length ",
+        k,
+        " (one per level of `blocks`).",
+        class = c("rtemis_dim_error", "rtemis_input_error")
+      )
+    }
+    color_for <- function(lvl) {
+      block_color[[match(as_key(lvl), level_keys)]]
+    }
+  }
+
+  # Skip predicate: NA, NULL, "transparent" -> no band.
+  is_blank <- function(v) {
+    is.null(v) ||
+      (length(v) == 1L && is.na(v)) ||
+      (is.character(v) && identical(v, "transparent"))
+  }
+
+  # Run-length-encode over blocks, skipping NA-level runs.
+  keys <- ifelse(is.na(blocks), NA_character_, as_key(blocks))
+  r <- rle(keys)
+  n_runs <- length(r[["values"]])
+  run_end <- cumsum(r[["lengths"]])
+  run_start <- c(1L, utils::head(run_end, -1L) + 1L)
+
+  # Which runs will be drawn (non-NA level, non-blank color).
+  drawn <- vapply(
+    seq_len(n_runs),
+    function(i) {
+      key <- r[["values"]][i]
+      !is.na(key) && !is_blank(color_for(key))
+    },
+    logical(1)
+  )
+
+  # On a value (numeric) x-axis a band drawn from x[first] to x[last] leaves
+  # an unshaded strip between adjacent runs (e.g. x=8 to x=9). Extend each
+  # drawn run's end to the next drawn run's start so they meet exactly. On a
+  # category axis, echarts shades full cells inclusive of both endpoints, so
+  # extending would overlap — keep the simple per-run endpoints there.
+  extend_to_next <- is.numeric(x)
+
+  pairs <- list()
+  for (i in seq_len(n_runs)) {
+    if (!drawn[i]) {
+      next
+    }
+    key <- r[["values"]][i]
+    col <- color_for(key)
+    x0 <- x[run_start[i]]
+    x1 <- if (extend_to_next && i < n_runs && drawn[i + 1L]) {
+      x[run_start[i + 1L]]
+    } else {
+      x[run_end[i]]
+    }
+    pairs[[length(pairs) + 1L]] <- list(
+      MarkAreaDataPoint(
+        x_axis = x0,
+        name = key,
+        item_style = ItemStyle(color = col, opacity = block_opacity)
+      ),
+      MarkAreaDataPoint(x_axis = x1)
+    )
+  }
+
+  if (length(pairs) == 0L) {
+    return(NULL)
+  }
+  MarkArea(data = pairs, silent = TRUE)
+}
+
+#' Resolve the `zoom` argument of `draw_*` functions
+#'
+#' Translates the ergonomic `zoom` argument into a list of [DataZoom] specs (or
+#' `NULL`). Accepts `FALSE`/`NULL` (no zoom), `TRUE` (default slider + inside
+#' pair on the given axis), a single [DataZoom], or a list of [DataZoom] /
+#' plain named lists (passed through untouched).
+#'
+#' @param zoom Logical, [DataZoom], or list: User-facing `zoom` argument.
+#' @param axis Character \{"x", "y"\}: Which axis the default `TRUE` preset
+#'   should target.
+#' @return Optional list of [DataZoom] specs (or plain lists): Value suitable
+#'   for `EChartsOption(data_zoom = ...)`.
+#' @keywords internal
+#' @noRd
+resolve_zoom <- function(zoom, axis = "x") {
+  if (is.null(zoom) || isFALSE(zoom)) {
+    return(NULL)
+  }
+  if (isTRUE(zoom)) {
+    axis_args <- if (identical(axis, "y")) {
+      list(y_axis_index = 0)
+    } else {
+      list(x_axis_index = 0)
+    }
+    return(list(
+      do.call(
+        DataZoom,
+        c(list(type = "slider", start = 0, end = 100), axis_args)
+      ),
+      do.call(
+        DataZoom,
+        c(
+          list(
+            type = "inside",
+            zoom_on_mouse_wheel = TRUE,
+            move_on_mouse_move = TRUE
+          ),
+          axis_args
+        )
+      )
+    ))
+  }
+  if (S7::S7_inherits(zoom, DataZoom)) {
+    return(list(zoom))
+  }
+  if (is.list(zoom)) {
+    return(zoom)
+  }
+  abort(
+    "`zoom` must be TRUE, FALSE, a DataZoom object, or a list; got ",
+    class(zoom)[1],
+    ".",
+    class = c("rtemis_type_error", "rtemis_input_error")
+  )
+}
+
+#' Build the ECharts option for a bar chart
+#'
+#' The single implementation shared by [draw_bar()], which resolves its arguments
+#' from vectors, and `compile()` on the corresponding [ChartConfig], which
+#' resolves them from a data frame. The render targets stay with the caller.
+#' Category tooltips retain all series values without drawing a hover guide.
+#'
+#' @inheritParams draw_bar
+#'
+#' @return [EChartsOption]: The option object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+bar_option <- function(
+  x,
+  y = NULL,
+  palette = NULL,
+  stack = FALSE,
+  horizontal = FALSE,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  margins = DEFAULT_MARGINS,
+  bar_width = NULL,
+  order = "input"
+) {
+  input <- bar_input(x, y, order)
+  x <- input[["x"]]
+  y <- input[["y"]]
+  if (!is.list(y) && length(palette) > 1L) {
+    palette <- rep_len(palette, length(x))[input[["index"]]]
+  }
+  # Validate this shared setting through the portable config property on both
+  # the vector and config paths; the low-level ECharts class also allows strings.
+  bar_width <- BarConfig(bar_width = bar_width)@bar_width
+  stack_group <- if (stack) "total" else NULL
+
+  if (is.list(y) && !is.null(names(y))) {
+    series_names <- names(y)
+    colors <- palette_colors(palette %||% rtemis_colors)
+    colors <- rep_len(colors, length(y))
+    series <- lapply(seq_along(y), function(i) {
+      BarSeries(
+        name = series_names[i],
+        data = y[[i]],
+        bar_width = bar_width,
+        stack = stack_group,
+        color = colors[i]
+      )
+    })
+  } else {
+    if (is.null(palette) || length(palette) <= 1L) {
+      series <- list(BarSeries(
+        data = y,
+        stack = stack_group,
+        color = palette,
+        bar_width = bar_width
+      ))
+    } else {
+      colors <- rep_len(palette_colors(palette), length(y))
+      data_items <- lapply(seq_along(y), function(i) {
+        list(
+          value = y[[i]],
+          itemStyle = list(color = colors[[i]])
+        )
+      })
+      series <- list(BarSeries(
+        data = data_items,
+        stack = stack_group,
+        bar_width = bar_width
+      ))
+    }
+  }
+
+  # Hide the redundant category guide while retaining axis tooltips and emphasis.
+  if (horizontal) {
+    x_ax <- Axis(type = "value", name = xlab)
+    y_ax <- Axis(
+      type = "category",
+      data = x,
+      name = ylab,
+      axis_pointer = list(type = "none")
+    )
+  } else {
+    x_ax <- Axis(
+      type = "category",
+      data = x,
+      name = xlab,
+      axis_pointer = list(type = "none")
+    )
+    y_ax <- Axis(type = "value", name = ylab)
+  }
+  # End-positioned names consume horizontal plot space for long measure
+  # labels. Match line/scatter charts and let ECharts resolve label clearance.
+  if (!is.null(xlab)) {
+    x_ax@name_location <- "middle"
+  }
+  if (!is.null(ylab)) {
+    y_ax@name_location <- "middle"
+  }
+
+  opt <- EChartsOption(
+    title = if (!is.null(title)) Title(text = title) else NULL,
+    tooltip = Tooltip(trigger = "axis"),
+    legend = if (length(series) > 1L) Legend() else NULL,
+    x_axis = x_ax,
+    y_axis = y_ax,
+    grid = resolve_margins(margins),
+    series = series
+  )
+
+  opt
+} # /rtemis.draw::bar_option
+
+
+#' Draw a Bar Chart
+#'
+#' Quick bar chart from x/y data.
+#'
+#' @param x Character or Numeric: Category labels, or values when y is omitted.
+#'   A matrix or two-dimensional table supplies categories in rows and series
+#'   in columns. A one-dimensional table supplies counts and category names.
+#' @inheritParams BarConfig order
+#' @param y Numeric or named list: Bar heights.
+#' @param palette Optional Character: Bar color or colors. For multiple series,
+#'   colors are applied per series and recycled as needed. For a single series,
+#'   a single color styles the whole series; multiple colors are recycled
+#'   across individual bars. `palette` takes precedence over the theme palette.
+#' @param stack Logical: Whether to stack bars.
+#' @param horizontal Logical: Whether to draw horizontal bars.
+#' @inheritParams BarConfig
+#' @param xlab Optional Character: X-axis title (bottom axis).
+#' @param ylab Optional Character: Y-axis title (left axis).
+#' @param title Optional Character: Chart title.
+#' @param theme Optional [Theme]: Theme override. The palette inside the theme can be
+#'   overridden per-chart with the `palette` argument.
+#' @param margins Optional Named numeric vector or named list: Plot margins in
+#'   pixels (or percentage strings) for any of `"top"`, `"right"`,
+#'   `"bottom"`, `"left"`. Unspecified sides keep echarts' default auto-sizing.
+#'   See [draw_line()] for details.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit DOM element ID for the widget
+#'   container. `NULL` lets htmlwidgets generate one.
+#' @param filename Optional Character: If provided, save the widget to this file via
+#'   [save_drawing()].
+#' @return htmlwidget: Widget object.
+#' @export
+#'
+#' @examples
+#' draw_bar(x = c("A", "B", "C"), y = c(3, 7, 2), title = "Counts")
+#' @inheritParams draw_line legend_position legend_placement
+draw_bar <- function(
+  x,
+  y = NULL,
+  palette = NULL,
+  stack = FALSE,
+  horizontal = FALSE,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  theme = NULL,
+  margins = DEFAULT_MARGINS,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  bar_width = NULL,
+  order = "input",
+  legend_position = "top",
+  legend_placement = "outside"
+) {
+  opt <- bar_option(
+    x = x,
+    y = y,
+    palette = palette,
+    stack = stack,
+    horizontal = horizontal,
+    bar_width = bar_width,
+    order = order,
+    xlab = xlab,
+    ylab = ylab,
+    title = title,
+    margins = margins
+  )
+
+  draw(
+    opt,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    meta = legend_meta(legend_position, legend_placement)
+  )
+}
+
+#' Build the ECharts option for a scatter chart
+#'
+#' The single implementation shared by [draw_scatter()], which resolves its
+#' arguments from vectors, and `compile()` on a [ScatterConfig], which resolves
+#' them from a data frame. Everything deciding what the chart *is* lives here;
+#' the render targets (`theme`, `width`, `height`, `element_id`, `filename`)
+#' stay with the caller, which is what lets one config render in different
+#' interfaces without changing what it means.
+#'
+#' @param x,y Numeric: Point coordinates.
+#' @param size Optional Numeric: Point sizes.
+#' @param group Optional Atomic vector or single-column data frame: Grouping
+#'   variable, one value per point.
+#' @param fit Optional Character: Fit to overlay: `"glm"`, `"gam"`, or an rtemis
+#'   supervised learning algorithm name.
+#' @param fit_params Optional Named list: Arguments passed to the learner.
+#' @param se Logical: If TRUE, shade the fit standard-error band.
+#' @param fit_alpha Numeric `[0, 1]`: Opacity of the standard-error band.
+#' @param point_alpha Optional Numeric `[0, 1]`: Point opacity. `NULL` sets it
+#'   from the number of points drawn.
+#' @param n_fit Integer `[2, Inf)`: Points used to draw the fit.
+#' @param palette Optional Character: Series colors.
+#' @param xlim,ylim Optional Numeric: Axis limits, length 2.
+#' @param pad Numeric `[0, Inf)`: Fraction of the data range to extend each
+#'   axis by when `xlim` / `ylim` are not given. The default matches base R's
+#'   `xaxs = "r"`, which extends the range by 4% at each end.
+#' @param palette Optional Character: Series colors, overriding the theme
+#'   palette for this chart.
+#' @param xlab,ylab Optional Character: Axis labels.
+#' @param title Optional Character: Chart title.
+#' @param margins Optional Named numeric vector or list: Plot margins in pixels.
+#'
+#' @return [EChartsOption]: The option object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+scatter_option <- function(
+  x,
+  y,
+  size = NULL,
+  group = NULL,
+  fit = NULL,
+  fit_params = NULL,
+  se = TRUE,
+  fit_alpha = 0.25,
+  n_fit = 200L,
+  palette = NULL,
+  xlim = NULL,
+  ylim = NULL,
+  pad = DEFAULT_PAD,
+  square = FALSE,
+  equal_axes = FALSE,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  margins = DEFAULT_MARGINS,
+  se_times = 1.96,
+  rsq = FALSE,
+  diagonal = FALSE,
+  diagonal_color = NULL,
+  fit_name = NULL,
+  rug = FALSE,
+  hover = NULL,
+  point_alpha = NULL
+) {
+  input <- scatter_input(x, y, group, size, hover)
+  x <- input[["x"]]
+  y <- input[["y"]]
+  group <- input[["group"]]
+  size <- input[["size"]]
+  hover <- input[["hover"]]
+  # The same declaration validates the vector and serialized-config routes.
+  n_fit <- clean_int(n_fit)
+  ScatterConfig(
+    fit = fit,
+    fit_params = fit_params,
+    fit_name = fit_name,
+    rug = rug,
+    se = se,
+    n_fit = n_fit,
+    fit_alpha = fit_alpha,
+    point_alpha = point_alpha,
+    pad = pad,
+    square = square,
+    equal_axes = equal_axes,
+    xlab = xlab,
+    ylab = ylab,
+    se_times = se_times,
+    rsq = rsq,
+    diagonal = diagonal,
+    diagonal_color = diagonal_color
+  )
+  validate_axis_lim(xlim, "xlim")
+  validate_axis_lim(ylim, "ylim")
+  # Asking for a square box *and* equal scaling is a statement about the limits;
+  # settle them before anything reads them.
+  limits <- equal_axis_limits(x, y, xlim, ylim, pad, square, equal_axes)
+  xlim <- limits[["xlim"]]
+  ylim <- limits[["ylim"]]
+
+  # Resolve axis limits. Defaults apply 4% symmetric padding so points aren't
+  # drawn on the axis edges — matches base R `xaxs = "r"` and ggplot2 ~5%.
+  x_lim <- xlim %||% calc_limits(x, pad)
+  y_lim <- ylim %||% calc_limits(y, pad)
+  # scatter_input() has already dropped incomplete rows, so this counts what is
+  # drawn. Without it, ECharts' own 0.8 default hides overlapping points.
+  point_alpha <- point_alpha %||% auto_alpha(length(x))
+
+  # Helper: compute fit line and CI band for one group
+  compute_fit <- function(xv, yv, fit_method, n_pts) {
+    # A fit needs aligned finite pairs and a residual degree of freedom when
+    # displaying uncertainty. Report the remedy before calling the fitter.
+    ok <- is.finite(xv) & is.finite(yv)
+    xv <- xv[ok]
+    yv <- yv[ok]
+    minimum <- if (se) 3L else 2L
+    if (length(xv) < minimum || length(unique(xv)) < 2L) {
+      abort(
+        "Each fitted group needs at least ",
+        minimum,
+        " complete pairs and two distinct x values; add observations or set `fit = NULL`.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    newdata <- data.frame(x = seq(min(xv), max(xv), length.out = n_pts))
+    pred <- fit_model_values(
+      data.frame(x = xv),
+      yv,
+      newdata,
+      fit_method,
+      se,
+      fit_params
+    )
+    # Learners without standard errors draw no band.
+    band <- pred[["se"]]
+    list(
+      x = newdata[["x"]],
+      fitted = pred[["fitted"]],
+      lower = if (!is.null(band)) pred[["fitted"]] - se_times * band,
+      upper = if (!is.null(band)) pred[["fitted"]] + se_times * band,
+      rsq = pred[["rsq"]]
+    )
+  }
+
+  # Helper: build fit + CI series for one group.
+  # Uses the scatter group's name so ECharts groups them together in the
+  # legend — clicking a group toggles scatter + fit + CI as a unit.
+  fit_series <- function(xv, yv, fit_method, n_pts, group_name, color) {
+    p <- compute_fit(xv, yv, fit_method, n_pts)
+    if (!is.null(fit_name)) {
+      group_name <- paste(c(group_name, fit_name), collapse = " - ")
+    }
+    if (rsq) {
+      group_name <- paste0(
+        group_name %||% "Fit",
+        " (R^2 = ",
+        if (is.na(p[["rsq"]])) {
+          "NA"
+        } else {
+          formatC(p[["rsq"]], format = "f", digits = 3L)
+        },
+        ")"
+      )
+    }
+    fit_data <- mapply(c, p[["x"]], p[["fitted"]], SIMPLIFY = FALSE)
+
+    out <- list()
+
+    if (!is.null(p[["lower"]])) {
+      # CI band as a closed polygon: upper bound L->R, lower bound R->L.
+      # areaStyle fills the enclosed region. No stacking needed.
+      upper <- mapply(c, p[["x"]], p[["upper"]], SIMPLIFY = FALSE)
+      lower <- mapply(c, rev(p[["x"]]), rev(p[["lower"]]), SIMPLIFY = FALSE)
+      ci_data <- c(upper, lower)
+      out$ci <- LineSeries(
+        name = group_name,
+        data = ci_data,
+        show_symbol = FALSE,
+        line_style = LineStyle(opacity = 0),
+        area_style = AreaStyle(color = color, opacity = fit_alpha),
+        silent = TRUE,
+        z = 0L,
+        legend_hover_link = FALSE
+      )
+    }
+
+    # Fit line (solid, on top)
+    out$fit <- LineSeries(
+      name = group_name,
+      data = fit_data,
+      show_symbol = FALSE,
+      line_style = LineStyle(color = color),
+      silent = TRUE
+    )
+
+    out
+  }
+
+  if (!is.null(group)) {
+    groups <- unique(group)
+    # Assign explicit colors so scatter and fit/CI match.
+    # Use the caller-supplied palette when provided, else fall back to rtemis_colors.
+    palette <- palette_colors(palette %||% rtemis_colors)
+    group_colors <- palette[((seq_along(groups) - 1L) %% length(palette)) + 1L]
+    series <- lapply(seq_along(groups), function(i) {
+      g <- groups[i]
+      idx <- group == g
+      dat <- scatter_points(
+        x[idx],
+        y[idx],
+        if (!is.null(size)) size[idx],
+        if (!is.null(hover)) hover[idx]
+      )
+      ScatterSeries(
+        name = as.character(g),
+        data = dat,
+        item_style = ItemStyle(color = group_colors[i], opacity = point_alpha)
+      )
+    })
+  } else {
+    dat <- scatter_points(x, y, size, hover)
+    series <- list(ScatterSeries(
+      data = dat,
+      item_style = ItemStyle(
+        color = palette_colors(palette %||% rtemis_colors)[[1L]],
+        opacity = point_alpha
+      )
+    ))
+  }
+
+  # Add fit series (share the scatter group name for legend grouping)
+  if (!is.null(fit)) {
+    if (!is.null(group)) {
+      for (i in seq_along(groups)) {
+        g <- groups[i]
+        idx <- group == g
+        fs <- fit_series(
+          x[idx],
+          y[idx],
+          fit,
+          n_fit,
+          as.character(g),
+          group_colors[i]
+        )
+        if (rsq || !is.null(fit_name)) {
+          series[[i]]@name <- fs[["fit"]]@name
+        }
+        series <- c(series, unname(fs))
+      }
+    } else {
+      color <- palette_colors(palette %||% rtemis_colors)[[1L]]
+      fs <- fit_series(x, y, fit, n_fit, NULL, color)
+      if (rsq || !is.null(fit_name)) {
+        series[[1L]]@name <- fs[["fit"]]@name
+      }
+      series <- c(series, unname(fs))
+    }
+  }
+
+  if (rug) {
+    # Boundary-relative custom marks remain attached to the visible axes during
+    # zoom/resize; their data values and group legend identities stay unchanged.
+    count <- if (is.null(group)) 1L else length(groups)
+    for (i in seq_len(count)) {
+      rows <- if (is.null(group)) seq_along(x) else which(group == groups[[i]])
+      series[[length(series) + 1L]] <- Filter(
+        Negate(is.null),
+        list(
+          type = "custom",
+          name = series[[i]]@name,
+          renderItem = "rtemis.rug.v1",
+          silent = TRUE,
+          clip = TRUE,
+          itemStyle = list(
+            color = if (!is.null(group)) {
+              group_colors[[i]]
+            } else {
+              palette_colors(palette %||% rtemis_colors)[[1L]]
+            }
+          ),
+          data = Map(c, x[rows], y[rows]),
+          encode = list(x = 0L, y = 1L)
+        )
+      )
+    }
+  }
+  # An unnamed, silent series does not add a legend entry or intercept hover.
+  # Clip the identity segment to the intersection of the two visible ranges.
+  if (diagonal) {
+    ends <- c(max(x_lim[[1L]], y_lim[[1L]]), min(x_lim[[2L]], y_lim[[2L]]))
+    if (ends[[1L]] < ends[[2L]]) {
+      series <- c(
+        series,
+        list(LineSeries(
+          data = lapply(ends, function(value) c(value, value)),
+          show_symbol = FALSE,
+          silent = TRUE,
+          legend_hover_link = FALSE,
+          line_style = LineStyle(
+            color = diagonal_color %||% "#888888",
+            type = "dashed"
+          ),
+          z = 1L
+        ))
+      )
+    }
+  }
+
+  # Tooltip formatter showing (x, y) with ddSci-style number formatting.
+  # Show series name only when there are multiple scatter groups.
+  show_name <- !is.null(group)
+  scatter_formatter <- htmlwidgets::JS(sprintf(
+    "function(p) {
+      function ddSci(x, dp) {
+        dp = dp || 2;
+        var a = Math.abs(x);
+        if (a === 0) return '0.' + '0'.repeat(dp);
+        if (a >= 1e6 || a < Math.pow(10, -dp)) return x.toExponential(1);
+        return x.toFixed(dp);
+      }
+      var m = p.marker || '';
+      var n = %s ? (p.seriesName + '<br/>') : '';
+      return m + n + ddSci(p.value[0]) + ', ' + ddSci(p.value[1]);
+    }",
+    if (show_name) "true" else "false"
+  ))
+
+  opt <- EChartsOption(
+    title = if (!is.null(title)) Title(text = title) else NULL,
+    tooltip = Tooltip(trigger = "item", formatter = scatter_formatter),
+    legend = if (
+      !is.null(group) || (!is.null(fit) && (rsq || !is.null(fit_name)))
+    ) {
+      # Keys stay opaque: a key faded like its points reads as a weaker color.
+      Legend(item_style = ItemStyle(opacity = 1))
+    } else {
+      NULL
+    },
+    x_axis = Axis(
+      type = "value",
+      name = xlab,
+      name_location = if (!is.null(xlab)) "middle" else NULL,
+      scale = TRUE,
+      min = x_lim[[1L]],
+      max = x_lim[[2L]],
+      split_line = no_corner_split_line(),
+      axis_label = no_corner_axis_label(),
+      axis_line = axis_line_for_orthogonal(y_lim)
+    ),
+    y_axis = Axis(
+      type = "value",
+      name = ylab,
+      name_location = if (!is.null(ylab)) "middle" else NULL,
+      scale = TRUE,
+      min = y_lim[[1L]],
+      max = y_lim[[2L]],
+      split_line = no_corner_split_line(),
+      axis_label = no_corner_axis_label(),
+      axis_line = axis_line_for_orthogonal(x_lim)
+    ),
+    color = if (is.null(group)) palette else NULL,
+    grid = resolve_margins(margins),
+    series = series
+  )
+
+  opt
+} # /rtemis.draw::scatter_option
+
+
+#' Draw a Scatter Plot
+#'
+#' Quick scatter plot from x/y data with optional fitted line and
+#' confidence band.
+#'
+#' @details
+#' # Square and equally-scaled plots
+#'
+#' `square` and `equal_axes` are separate requests. `square` is about the
+#' *shape* of the plotting box: equal height and width in pixels, measured on
+#' the box itself, not including axis labels or margins. `equal_axes` is about
+#' *scale*: one data unit occupies the same number of pixels on both axes, so a
+#' 45-degree line really is a slope of 1.
+#'
+#' Either works alone. `equal_axes` on a chart whose x spans ten units and whose
+#' y spans one gives a wide, short box, which is what equal scaling means there.
+#'
+#' Asking for both is a statement about the limits, since the only square box in
+#' which both axes are equally scaled is one whose axes span the same interval.
+#' So both axes are made to span one interval: over all the values when neither
+#' limit was given, or the one you gave when you gave exactly one. Giving both
+#' `xlim` and `ylim` as different intervals is an error rather than a silent
+#' override.
+#'
+#' The box itself is solved in the browser, which is the only side that knows
+#' how wide the container is, and re-solved whenever it resizes.
+#'
+#' @param x Numeric: X values.
+#' @param y Numeric: Y values.
+#' @param size Optional Numeric: Symbol sizes.
+#' @param group Optional Atomic vector or single-column data frame: Grouping
+#'   variable for multiple series.
+#' @param fit Optional Character: Model fitted to `y` on `x` and drawn as a line.
+#'   `"glm"` uses [stats::glm()] and `"gam"` uses [mgcv::gam()]. Any other name,
+#'   matched case-insensitively, is an rtemis supervised learning algorithm,
+#'   such as `"LINAD"`, `"CART"` or `"LightGBM"`, trained with its default
+#'   hyperparameters; this requires the rtemis package (>= 1.4.1). `NULL`
+#'   disables fitting. The fitted line and standard-error band are computed per
+#'   group when `group` is provided.
+#' @param fit_params Optional Named list: Arguments passed to the learner named
+#'   in `fit`, as argument-value pairs: to [stats::glm()] for `"glm"`, e.g.
+#'   `list(family = "poisson")`; to [mgcv::gam()] for `"gam"`, where `k` sets
+#'   the basis dimension of the smooth, e.g. `list(k = 5)`; and to the rtemis
+#'   setup function otherwise, e.g. `list(max_leaves = 8)` for `"LINAD"`, whose
+#'   arguments are listed in `?rtemis::setup_LINAD`. `NULL` uses the learner's
+#'   defaults.
+#' @param se Logical: Whether to show the standard-error band. Algorithms
+#'   without standard errors (every rtemis algorithm except GLM, GAM and a few
+#'   others) draw the line alone.
+#' @param se_times Numeric `[0, Inf)`: Standard-error multiplier for the band.
+#' @param fit_name Optional Character: Label for fitted layers.
+#' @param rug Logical: Draw marginal marks on both axes.
+#' @param hover Optional Character: One literal tooltip label per observation.
+#' @param rsq Logical: Include the fitted model's R-squared in series labels.
+#'   This describes the overlay fit, not predictive performance against the
+#'   identity line. Constant responses have undefined R-squared, labeled `NA`.
+#' @param diagonal Logical: Draw a dashed identity line within the axis limits.
+#' @param diagonal_color Optional Character: Identity-line color.
+#' @param fit_alpha Numeric `[0, 1]`: Opacity for the confidence-band fill.
+#' @param point_alpha Optional Numeric `[0, 1]`: Point opacity. `NULL` sets it
+#'   from the number of points drawn, as a rough guard against overplotting:
+#'   0.75 at 10 points, 0.57 at 150, 0.45 at 1,000 and 0.3 at 10,000, clamped
+#'   to `[0.15, 0.9]`. Set a value to override.
+#' @param n_fit Integer `[2, Inf)`: Number of evaluation points for the fit.
+#' @param palette Optional Character: Series color palette — a single color string or
+#'   character vector that overrides the theme palette for this chart.
+#'   When `group` is set, colors are assigned per group in order. `color` takes
+#'   precedence over the theme palette.
+#' @param xlim Optional Numeric \[length 2\]: X-axis limits `c(min, max)`.
+#'   Defaults to `range(x)` extended by `pad`.
+#' @param ylim Optional Numeric \[length 2\]: Y-axis limits `c(min, max)`.
+#'   Defaults to `range(y)` extended by `pad`.
+#' @param pad Numeric `[0, Inf)`: Fraction of the data range to extend each
+#'   axis by when `xlim` / `ylim` are not given. The default matches base R's
+#'   `xaxs = "r"`, which extends the range by 4% at each end.
+#' @param square Logical: If TRUE, draw the plotting box square -- equal height
+#'   and width in pixels, excluding axis labels and margins.
+#' @param equal_axes Logical: If TRUE, give one data unit the same size in
+#'   pixels on both axes. Set both for a plot that is square *and* to scale,
+#'   such as a true-versus-predicted plot whose identity line should run at 45
+#'   degrees; the two axes are then made to span the same interval. See
+#'   Details.
+#' @param xlab Optional Character: X-axis title.
+#' @param ylab Optional Character: Y-axis title.
+#' @param title Optional Character: Chart title.
+#' @param theme Optional [Theme]: Theme override. The palette inside the theme can be
+#'   overridden per-chart with the `color` argument.
+#' @param margins Optional Named numeric vector or named list: Plot margins in
+#'   pixels (or percentage strings) for any of `"top"`, `"right"`,
+#'   `"bottom"`, `"left"`. Unspecified sides keep echarts' default auto-sizing.
+#'   See [draw_line()] for details.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit DOM element ID for the widget
+#'   container. `NULL` lets htmlwidgets generate one.
+#' @param filename Optional Character: If provided, save the widget to this file via
+#'   [save_drawing()].
+#'
+#' @return htmlwidget: Widget object.
+#'
+#' @examples
+#' # True versus predicted: square box, equal scale, identity line at 45 deg.
+#' draw_scatter(
+#'   x = c(1, 2, 3, 4),
+#'   y = c(1.1, 1.9, 3.4, 3.7),
+#'   square = TRUE,
+#'   equal_axes = TRUE,
+#'   xlab = "True",
+#'   ylab = "Predicted"
+#' )
+#'
+#' @export
+#' @inheritParams draw_line legend_position legend_placement
+draw_scatter <- function(
+  x,
+  y,
+  size = NULL,
+  group = NULL,
+  fit = NULL,
+  fit_params = NULL,
+  se = TRUE,
+  fit_alpha = 0.25,
+  n_fit = 200L,
+  palette = NULL,
+  xlim = NULL,
+  ylim = NULL,
+  pad = DEFAULT_PAD,
+  square = FALSE,
+  equal_axes = FALSE,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  theme = NULL,
+  margins = DEFAULT_MARGINS,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  se_times = 1.96,
+  rsq = FALSE,
+  diagonal = FALSE,
+  diagonal_color = NULL,
+  legend_position = "top",
+  legend_placement = "outside",
+  fit_name = NULL,
+  rug = FALSE,
+  hover = NULL,
+  point_alpha = NULL
+) {
+  opt <- scatter_option(
+    x = x,
+    y = y,
+    size = size,
+    group = group,
+    fit = fit,
+    fit_params = fit_params,
+    fit_name = fit_name,
+    rug = rug,
+    hover = hover,
+    se = se,
+    se_times = se_times,
+    rsq = rsq,
+    diagonal = diagonal,
+    diagonal_color = diagonal_color,
+    fit_alpha = fit_alpha,
+    point_alpha = point_alpha,
+    n_fit = n_fit,
+    palette = palette,
+    xlim = xlim,
+    ylim = ylim,
+    pad = pad,
+    square = square,
+    equal_axes = equal_axes,
+    xlab = xlab,
+    ylab = ylab,
+    title = title,
+    margins = margins
+  )
+
+  draw(
+    opt,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    meta = c(
+      legend_meta(legend_position, legend_placement),
+      aspect_meta(opt, square = square, equal_axes = equal_axes)
+    )
+  )
+}
+
+#' Build the ECharts option for a pie chart
+#'
+#' The single implementation shared by [draw_pie()], which resolves its arguments
+#' from vectors, and `compile()` on the corresponding [ChartConfig], which
+#' resolves them from a data frame. The render targets stay with the caller.
+#'
+#' @inheritParams draw_pie
+#'
+#' @return [EChartsOption]: The option object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+pie_option <- function(
+  values,
+  labels = NULL,
+  radius = "75%",
+  rose_type = NULL,
+  palette = NULL,
+  title = NULL,
+  label_format = "name",
+  percent_digits = 1L
+) {
+  input <- pie_input(values, labels)
+  values <- input[["values"]]
+  labels <- input[["labels"]]
+  config <- setup_PieConfig(
+    label_format = label_format,
+    percent_digits = percent_digits
+  )
+  formatter <- switch(
+    config@label_format,
+    name = "{b}",
+    value = "{c}",
+    percent = "{d}%",
+    name_value = "{b}: {c}",
+    name_percent = "{b}: {d}%"
+  )
+  data_items <- mapply(
+    function(v, n) list(value = v, name = n),
+    values,
+    labels,
+    SIMPLIFY = FALSE,
+    USE.NAMES = FALSE
+  )
+
+  opt <- EChartsOption(
+    title = if (!is.null(title)) Title(text = title, left = "center") else NULL,
+    tooltip = Tooltip(trigger = "item"),
+    legend = Legend(orient = "vertical", left = "left"),
+    color = palette,
+    series = PieSeries(
+      data = data_items,
+      radius = radius,
+      rose_type = rose_type,
+      # Edge alignment keeps outside labels on the page at narrow widths.
+      label = PieLabelOption(
+        align_to = "edge",
+        edge_distance = 8,
+        formatter = formatter
+      ),
+      avoid_label_overlap = TRUE
+    )
+  )
+
+  series <- to_list(opt@series)
+  series[["percentPrecision"]] <- config@percent_digits
+  opt@series <- list(series)
+  opt
+} # /rtemis.draw::pie_option
+
+
+#' Draw a Pie Chart
+#'
+#' Quick pie chart from values and labels.
+#'
+#' @param values Numeric or data frame: Slice values, or a two-column table
+#'   containing labels followed by values. Values must be finite and nonnegative
+#'   with a positive total.
+#' @param label_format Character `{"name", "value", "percent", "name_value", "name_percent"}`: Slice label content.
+#' @param percent_digits Integer `[0, 6]`: Percentage precision.
+#' @param labels Optional Character: Slice labels; names(values) when omitted.
+#' @param radius Numeric or Character: Pie radius.
+#' @param rose_type Optional Character \{"radius", "area"\}: Nightingale chart type.
+#' @param palette Optional Character: Series color palette — a single color string or
+#'   character vector that overrides the theme palette for this chart.
+#'   `color` takes precedence over the theme palette (it sets `option.color`).
+#' @param title Optional Character: Chart title.
+#' @param theme Optional [Theme]: Theme override. The palette inside the theme can be
+#'   overridden per-chart with the `color` argument.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit DOM element ID for the widget
+#'   container. `NULL` lets htmlwidgets generate one.
+#' @param filename Optional Character: If provided, save the widget to this file via
+#'   [save_drawing()].
+#' @return htmlwidget: Widget object.
+#' @export
+#'
+#' @examples
+#' draw_pie(
+#'   values = c(1048, 735, 580),
+#'   labels = c("Chrome", "Firefox", "Safari")
+#' )
+#' @inheritParams draw_line legend_position legend_placement
+draw_pie <- function(
+  values,
+  labels = NULL,
+  radius = "75%",
+  rose_type = NULL,
+  palette = NULL,
+  title = NULL,
+  theme = NULL,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  legend_position = "top",
+  legend_placement = "outside",
+  label_format = "name",
+  percent_digits = 1L
+) {
+  opt <- pie_option(
+    values = values,
+    labels = labels,
+    radius = radius,
+    rose_type = rose_type,
+    palette = palette,
+    title = title,
+    label_format = label_format,
+    percent_digits = percent_digits
+  )
+
+  draw(
+    opt,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    meta = legend_meta(legend_position, legend_placement)
+  )
+}
+
+#' Draw a Density Plot
+#'
+#' Kernel density estimation plot from numeric data, with optional grouping
+#' for multiple traces. A list input creates one density trace per vector when
+#' ungrouped, or one trace per variable/group combination when `group` is
+#' supplied. Curves use [stats::density()] with its bandwidth-scaled kernels
+#' and evaluation range extending three bandwidths beyond the data. Empty
+#' samples retain their identity without a curve. Singleton and constant
+#' samples require an explicit bandwidth; no spread is inferred for them.
+#' Missing groups are excluded, and infinite/nonnumeric observations rejected.
+#'
+#' @param mode Character `{"overlap", "ridge"}`: Overlay samples or align rows
+#'   on common x and y scales. Ridge rows use sample names in place of a legend.
+#'   Increase figure height for many rows.
+#' @param order Character `{"input", "mean", "median"}`: Sample order. Summary
+#'   orders are decreasing, retain ties in input order, and place empty samples last.
+#' @param x Numeric or list: Values used for density estimation. An ungrouped
+#'   list creates one density trace per element; with `group`, each list
+#'   element is split by group into separate traces.
+#' @param group Optional Atomic vector or single-column data frame: Grouping
+#'   variable for multiple density traces.
+#' @param n Integer `[2, Inf)`: Number of density evaluation points.
+#' @param bw Character or Numeric: Bandwidth selector (`"nrd0"`, `"nrd"`,
+#'   `"ucv"`, `"bcv"`, `"SJ"`, `"SJ-ste"`, `"SJ-dpi"`). Numeric input is
+#'   normalized to `bandwidth` by the setup function.
+#' @param bandwidth Optional Numeric `(0, Inf)`: Explicit finite smoothing
+#'   bandwidth in measurement units, overriding the selector.
+#' @param kernel Character: One of `"gaussian"`, `"epanechnikov"`, `"rectangular"`,
+#'   `"triangular"`, `"biweight"`, `"cosine"`, or `"optcosine"`.
+#' @param adjust Numeric `(0, Inf)`: Finite bandwidth multiplier.
+#' @param fill_alpha Numeric `[0, 1]`: Distribution fill opacity.
+#' @param na_rm Logical: Whether to remove `NA` values before
+#'   computing densities.
+#' @param palette Optional Character: Series colors, overriding the theme
+#'   palette for this chart. `NULL` uses the theme's.
+#' @param xlab Optional Character: X-axis title.
+#' @param ylab Optional Character: Y-axis title.
+#' @param title Optional Character: Chart title.
+#' @param theme Optional [Theme]: Theme override.
+#' @param margins Optional Named numeric vector or named list: Plot margins in
+#'   pixels (or percentage strings) for any of `"top"`, `"right"`,
+#'   `"bottom"`, `"left"`. Unspecified sides keep echarts' default auto-sizing.
+#'   See [draw_line()] for details.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param verbosity Integer `[0, Inf)`: Verbosity level for removed-`NA` messages.
+#' @param element_id Optional Character: Explicit DOM element ID for the widget
+#'   container. `NULL` lets htmlwidgets generate one.
+#' @param filename Optional Character: If provided, save the widget to this file via
+#'   [save_drawing()].
+#' @return htmlwidget: Widget object.
+#' @export
+#'
+#' @examples
+#' draw_density(iris[["Sepal.Length"]], xlab = "Sepal length")
+#' @inheritParams draw_line legend_position legend_placement
+draw_density <- function(
+  x,
+  group = NULL,
+  n = 512,
+  bw = "nrd0",
+  na_rm = TRUE,
+  palette = NULL,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  theme = NULL,
+  margins = DEFAULT_MARGINS,
+  width = NULL,
+  height = NULL,
+  verbosity = 1L,
+  element_id = NULL,
+  filename = NULL,
+  legend_position = "top",
+  legend_placement = "outside",
+  bandwidth = NULL,
+  kernel = "gaussian",
+  adjust = 1,
+  fill_alpha = .25,
+  mode = "overlap",
+  order = "input"
+) {
+  opt <- density_option(
+    x = x,
+    group = group,
+    n = n,
+    bw = bw,
+    na_rm = na_rm,
+    palette = palette,
+    xlab = xlab,
+    ylab = ylab,
+    title = title,
+    margins = margins,
+    verbosity = verbosity,
+    bandwidth = bandwidth,
+    kernel = kernel,
+    adjust = adjust,
+    fill_alpha = fill_alpha,
+    mode = mode,
+    order = order
+  )
+
+  draw(
+    opt,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    meta = legend_meta(legend_position, legend_placement)
+  )
+}
+
+#' Draw a Histogram
+#'
+#' Histogram from numeric data, with optional grouping for multiple traces.
+#' Bins are computed using [graphics::hist()] with consistent break points
+#' across groups. Rectangles span their actual numeric intervals, including
+#' unequal widths. Grouped samples overlap with translucent fills. Intervals
+#' are right-closed, with the lowest edge included, using `hist()` boundary
+#' tolerance. Missing groups are excluded; empty samples have zero counts.
+#'
+#' Normalization is within each sample: `"count"` is the raw count;
+#' `"probability"` and `"percent"` divide by sample size (and multiply by 100
+#' for percent). `"density"` divides by sample size and bin width, so total
+#' area is one. `"count_density"` divides only by width, so area is sample size.
+#' Unequal-width bins require one of the two density scales.
+#'
+#' With `density = TRUE`, each curve uses the same settings as [draw_density()]
+#' and is scaled to the chosen histogram units. Count, probability, and percent
+#' curves multiply the estimated density by the common bin width and the
+#' appropriate sample-size factor. Density/count-density curves need no width
+#' factor. The histogram and curve share a color and legend toggle.
+#'
+#' @param x Numeric or List: Values or named numeric vectors to bin.
+#' @inheritParams draw_density mode order
+#' @param group Optional Atomic vector or single-column data frame: Grouping
+#'   variable for multiple series.
+#' @param breaks Numeric, Character, or Numeric vector: Binning method. A single number (number of bins), a character
+#'   string naming an algorithm (e.g. `"Sturges"`, `"Scott"`, `"FD"`), or a
+#'   numeric vector of break points. Numeric forms are normalized to `bins` or
+#'   `bin_edges` by the setup function. Bin counts are suggestions to `hist()`.
+#' @param bins Optional Integer `[1, 1000000]`: Suggested bin count.
+#' @param bin_edges Optional Numeric vector: Finite, strictly increasing edges
+#'   spanning every retained observation. Overrides `breaks`; excludes `bins`.
+#' @param normalization Character: `"count"`, `"probability"`, `"percent"`,
+#'   `"density"`, or `"count_density"`.
+#' @param bin_stat Character `{"count", "sum", "mean", "min", "max"}`: Statistic of
+#'   x observations in each bin. Empty bins have height zero. Non-count
+#'   statistics require normalization = "count" and density = FALSE.
+#' @param bar_mode Character `{"overlay", "group", "stack"}`: Histogram group layout.
+#'   Stacks accumulate positive and negative values separately. Group/stack
+#'   layouts require mode = "overlap" and density = FALSE.
+#' @param density Logical: Overlay a kernel density in histogram units.
+#' @inheritParams draw_density n bw bandwidth kernel adjust fill_alpha na_rm verbosity
+#' @param palette Optional Character: Series colors, overriding the theme
+#'   palette for this chart. `NULL` uses the theme's.
+#' @param xlab Optional Character: X-axis title.
+#' @param ylab Optional Character: Y-axis title.
+#' @param title Optional Character: Chart title.
+#' @param theme Optional [Theme]: Theme override.
+#' @param margins Optional Named numeric vector or named list: Plot margins in
+#'   pixels (or percentage strings) for any of `"top"`, `"right"`,
+#'   `"bottom"`, `"left"`. Unspecified sides keep echarts' default auto-sizing.
+#'   See [draw_line()] for details.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit DOM element ID for the widget
+#'   container. `NULL` lets htmlwidgets generate one.
+#' @param filename Optional Character: If provided, save the widget to this file via
+#'   [save_drawing()].
+#' @return htmlwidget: Widget object.
+#' @export
+#'
+#' @examples
+#' draw_histogram(iris[["Sepal.Length"]], xlab = "Sepal length")
+#' @inheritParams draw_line legend_position legend_placement
+draw_histogram <- function(
+  x,
+  group = NULL,
+  breaks = "Sturges",
+  palette = NULL,
+  xlab = NULL,
+  ylab = NULL,
+  title = NULL,
+  theme = NULL,
+  margins = DEFAULT_MARGINS,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  legend_position = "top",
+  legend_placement = "outside",
+  bins = NULL,
+  bin_edges = NULL,
+  normalization = "count",
+  density = FALSE,
+  n = 512L,
+  bw = "nrd0",
+  bandwidth = NULL,
+  kernel = "gaussian",
+  adjust = 1,
+  fill_alpha = .25,
+  na_rm = TRUE,
+  verbosity = 1L,
+  mode = "overlap",
+  order = "input",
+  bin_stat = "count",
+  bar_mode = "overlay"
+) {
+  opt <- histogram_option(
+    x = x,
+    group = group,
+    breaks = breaks,
+    palette = palette,
+    xlab = xlab,
+    ylab = ylab,
+    title = title,
+    margins = margins,
+    bins = bins,
+    bin_edges = bin_edges,
+    normalization = normalization,
+    density = density,
+    n = n,
+    bw = bw,
+    bandwidth = bandwidth,
+    kernel = kernel,
+    adjust = adjust,
+    fill_alpha = fill_alpha,
+    na_rm = na_rm,
+    verbosity = verbosity,
+    mode = mode,
+    order = order,
+    bin_stat = bin_stat,
+    bar_mode = bar_mode
+  )
+
+  draw(
+    opt,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    meta = legend_meta(legend_position, legend_placement)
+  )
+}
+
+# -- hclust_to_dendro_data ------------------------------------------------------
+
+#' Convert an hclust object to ECharts custom-series segment data
+#'
+#' Extracts the merge tree from an `hclust` result and returns a list of
+#' 5-element tuples `[left_pos, right_pos, left_h, right_h, merge_h]`, one per
+#' internal merge.  Each tuple encodes the four-point L/U polyline drawn by the
+#' ECharts `custom` renderItem for that merge.
+#'
+#' @param h `hclust` object returned by [stats::hclust()].
+#' @param uniform Logical: Whether to use uniform heights for rendering.
+#' @param leaf_positions Optional Numeric: Display positions of ordered leaves.
+#' @return Named list with three elements:
+#'   \describe{
+#'     \item{`data`}{Length `n - 1` list of 5-element numeric lists.}
+#'     \item{`min_height`}{Numeric: height of the lowest merge.}
+#'     \item{`max_height`}{Numeric: height of the root merge (used for axis scaling).}
+#'   }
+#' @keywords internal
+#' @noRd
+hclust_to_dendro_data <- function(h, uniform = FALSE, leaf_positions = NULL) {
+  n <- length(h[["order"]])
+
+  # leaf_pos[i] = 0-based position of leaf i in the reordered sequence
+  leaf_pos <- numeric(n)
+  for (p in seq_len(n)) {
+    leaf_pos[h[["order"]][p]] <- (leaf_positions %||% (seq_len(n) - 1L))[[p]]
+  }
+
+  # node_pos[k] = midpoint position of internal node k
+  node_pos <- numeric(n - 1L)
+  for (k in seq_len(n - 1L)) {
+    l <- h[["merge"]][k, 1L]
+    r <- h[["merge"]][k, 2L]
+    lp <- if (l < 0L) leaf_pos[-l] else node_pos[l]
+    rp <- if (r < 0L) leaf_pos[-r] else node_pos[r]
+    node_pos[k] <- (lp + rp) / 2.0
+  }
+
+  # Heights used for rendering: actual merge distances or uniform levels 1..n-1.
+  # Uniform heights give each merge step equal visual height, making the
+  # dendrogram easier to read when merge distances span a wide range.
+  heights <- if (uniform) seq_len(n - 1L) else h[["height"]]
+
+  # Build one 5-tuple per merge: [left_pos, right_pos, left_h, right_h, merge_h]
+  data <- vector("list", n - 1L)
+  for (k in seq_len(n - 1L)) {
+    l <- h[["merge"]][k, 1L]
+    r <- h[["merge"]][k, 2L]
+    lp <- if (l < 0L) leaf_pos[-l] else node_pos[l]
+    rp <- if (r < 0L) leaf_pos[-r] else node_pos[r]
+    lh <- if (l < 0L) 0.0 else heights[l]
+    rh <- if (r < 0L) 0.0 else heights[r]
+    data[[k]] <- list(lp, rp, lh, rh, heights[k])
+  }
+
+  list(
+    data = data,
+    min_height = min(heights),
+    max_height = max(heights, .Machine$double.eps)
+  )
+}
+
+# Build a diverging color palette where the midpoint color falls exactly at
+# value 0, even when zlim is asymmetric (e.g. c(-0.74, 1.0)).
+# Stops are allocated proportionally: abs(zlim[1])/span of the stops cover the
+# negative side, the rest cover the positive side.
+#
+# @param neg_color Character: Color at zlim[1].
+# @param mid_color Character: Color at 0.
+# @param pos_color Character: Color at zlim[2].
+# @param zlim Numeric: Length-2 vector c(min, max) with zlim[1] < 0 < zlim[2].
+# @param n Integer: Total number of color stops (odd is conventional).
+# @return Character vector of hex colors of length n.
+# @keywords internal
+# @noRd
+diverging_palette <- function(neg_color, mid_color, pos_color, zlim, n = 101L) {
+  span <- zlim[[2L]] - zlim[[1L]]
+  n_neg <- round(abs(zlim[[1L]]) / span * (n - 1L)) + 1L
+  n_neg <- max(2L, min(n - 1L, n_neg))
+  n_pos <- n - n_neg + 1L
+  n_pos <- max(2L, n_pos)
+  neg_ramp <- grDevices::colorRampPalette(c(neg_color, mid_color))(n_neg)
+  pos_ramp <- grDevices::colorRampPalette(c(mid_color, pos_color))(n_pos)
+  # Remove the duplicated midpoint that both ramps share
+  c(neg_ramp, pos_ramp[-1L])
+}
+
+# Compute the axis minimum for a dendrogram height axis so that leaf stubs
+# occupy `stub_frac` of the visible range rather than spanning all the way
+# to zero.  When every merge is in a tight band near the top, this prevents
+# the stems from dominating the panel with empty space.
+#
+# @param min_h Numeric: height of the lowest merge.
+# @param max_h Numeric: height of the root merge.
+# @param stub_frac Numeric `(0, 1)`: fraction of visible range allocated to stubs.
+# @return Numeric: axis min value (may be negative for very compressed ranges).
+# @keywords internal
+# @noRd
+dendro_axis_min <- function(min_h, max_h, stub_frac = 0.1) {
+  if (min_h >= max_h) {
+    return(min_h * (1 - stub_frac))
+  }
+  (min_h - stub_frac * max_h) / (1 - stub_frac)
+}
+
+# -- draw_heatmap ---------------------------------------------------------------
+
+#' Build the render option and hints for a heatmap
+#'
+#' The single implementation shared by [draw_heatmap()] and `compile()` on the
+#' corresponding [ChartConfig].
+#'
+#' Returns both the option and a `render` list, because this chart derives
+#' hints about the *display surface* from its own content. Those are the
+#' interface's business: they are handed to `draw()` and are never written
+#' into a config document, since a height or a container geometry computed
+#' for one surface is wrong on another.
+#'
+#' @inheritParams draw_heatmap
+#'
+#' @return Named list: `option` (the [EChartsOption]) and `render` (hints for the caller).
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+heatmap_option <- function(
+  width = NULL,
+  height = NULL,
+  x,
+  row_names = NULL,
+  col_names = NULL,
+  triangle = NULL,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  dist_method = "euclidean",
+  hclust_method = "complete",
+  show_row_dendro = TRUE,
+  show_col_dendro = TRUE,
+  dendro_row_width = 60,
+  dendro_col_height = 60,
+  dendro_color = NULL,
+  dendro_uniform = FALSE,
+  dendro_row_side = "right",
+  dendro_col_side = "top",
+  square_cells = NULL,
+  colormap = NULL,
+  zlim = NULL,
+  show_values = FALSE,
+  value_digits = 2L,
+  show_colorbar = TRUE,
+  colorbar_orient = "vertical",
+  title = NULL,
+  margins = NULL,
+  row_tree = NULL,
+  col_tree = NULL,
+  cell_notes = NULL,
+  row_colors = NULL,
+  col_colors = NULL,
+  show_notes = FALSE,
+  row_cut = NULL,
+  col_cut = NULL
+) {
+  input <- heatmap_input(
+    x,
+    row_tree,
+    col_tree,
+    cell_notes,
+    row_colors,
+    col_colors
+  )
+  x <- input[["values"]]
+  row_h <- input[["row_tree"]]
+  col_h <- input[["col_tree"]]
+  notes <- input[["cell_notes"]]
+  row_colors <- input[["row_colors"]]
+  col_colors <- input[["col_colors"]]
+  if (
+    !is.logical(show_notes) ||
+      length(show_notes) != 1L ||
+      is.na(show_notes) ||
+      (show_notes && (is.null(notes) || show_values))
+  ) {
+    abort(
+      "Use show_notes with supplied cell_notes, and choose either notes or numeric value labels.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (!is.null(triangle) && (!is.null(row_h) || !is.null(col_h))) {
+    abort(
+      "Use a full matrix with supplied trees; triangle masking removes leaves.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (!is.null(triangle)) {
+    triangle <- match.arg(triangle, c("upper", "lower"))
+  }
+  colorbar_orient <- match.arg(colorbar_orient, c("vertical", "horizontal"))
+  dendro_row_side <- match.arg(dendro_row_side, c("right", "left"))
+  dendro_col_side <- match.arg(dendro_col_side, c("top", "bottom"))
+
+  n_rows <- nrow(x)
+  n_cols <- ncol(x)
+
+  # -- 2. Row / column labels ----------------------------------------------------
+  rn <- row_names %||% rownames(x) %||% as.character(seq_len(n_rows))
+  cn <- col_names %||% colnames(x) %||% as.character(seq_len(n_cols))
+
+  if (length(rn) != n_rows || length(cn) != n_cols || anyNA(rn) || anyNA(cn)) {
+    abort(
+      "Supply one nonmissing display label per matrix row and column.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+
+  # -- 3. Triangle masking -------------------------------------------------------
+  # For symmetric matrices (e.g. correlation), the diagonal is uninformative
+  # (always 1 for correlations), so mask it along with the hidden triangle.
+  # After masking, drop any rows/cols that are entirely NA — these are the
+  # "outer" labels (first variable on y-axis, last on x-axis for lower triangle)
+  # that have no visible cells and would otherwise float label-only in the plot.
+  if (!is.null(triangle)) {
+    mask <- if (triangle == "upper") lower.tri(x) else upper.tri(x)
+    x[mask] <- NA
+    diag(x) <- NA
+    rows_keep <- apply(x, 1L, function(r) any(!is.na(r)))
+    cols_keep <- apply(x, 2L, function(c) any(!is.na(c)))
+    if (!any(rows_keep) || !any(cols_keep)) {
+      abort(
+        "Choose a triangle containing at least one finite off-diagonal value.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    x <- x[rows_keep, cols_keep, drop = FALSE]
+    if (!is.null(notes)) {
+      notes <- notes[rows_keep, cols_keep, drop = FALSE]
+    }
+    if (!is.null(row_colors)) {
+      row_colors <- row_colors[rows_keep, , drop = FALSE]
+    }
+    if (!is.null(col_colors)) {
+      col_colors <- col_colors[cols_keep, , drop = FALSE]
+    }
+    rn <- rn[rows_keep]
+    cn <- cn[cols_keep]
+    n_rows <- nrow(x)
+    n_cols <- ncol(x)
+  }
+
+  # -- 4. Hierarchical clustering (reorders matrix in place) ---------------------
+  # hclust objects are retained so dendrograms can be rendered (when requested).
+  row_ord <- seq_len(n_rows)
+  col_ord <- seq_len(n_cols)
+  row_positions <- seq_len(n_rows) - 1L
+  col_positions <- seq_len(n_cols) - 1L
+  if (!is.null(row_h)) {
+    row_ord <- row_h[["order"]]
+  } else if (cluster_rows && n_rows > 1L) {
+    complete <- rowSums(!is.na(x)) > 0L
+    if (sum(complete) > 1L) {
+      d <- stats::dist(x[complete, , drop = FALSE], method = dist_method)
+      row_h <- stats::hclust(d, method = hclust_method)
+      row_ord[complete] <- which(complete)[row_h[["order"]]]
+      row_positions <- which(complete) - 1L
+    }
+  }
+  if (!is.null(col_h)) {
+    col_ord <- col_h[["order"]]
+  } else if (cluster_cols && n_cols > 1L) {
+    complete <- colSums(!is.na(x)) > 0L
+    if (sum(complete) > 1L) {
+      d <- stats::dist(t(x[, complete, drop = FALSE]), method = dist_method)
+      col_h <- stats::hclust(d, method = hclust_method)
+      col_ord[complete] <- which(complete)[col_h[["order"]]]
+      col_positions <- which(complete) - 1L
+    }
+  }
+  x <- x[row_ord, col_ord, drop = FALSE]
+  rn <- rn[row_ord]
+  cn <- cn[col_ord]
+  if (!is.null(notes)) {
+    notes <- notes[row_ord, col_ord, drop = FALSE]
+  }
+  if (!is.null(row_colors)) {
+    row_colors <- row_colors[row_ord, , drop = FALSE]
+  }
+  if (!is.null(col_colors)) {
+    col_colors <- col_colors[col_ord, , drop = FALSE]
+  }
+  branch_color <- dendro_color %||% "#99999988"
+  row_branch_colors <- heatmap_branch_colors(row_h, row_cut, branch_color)
+  col_branch_colors <- heatmap_branch_colors(col_h, col_cut, branch_color)
+
+  # -- 5. Color limits -----------------------------------------------------------
+  if (is.null(zlim)) {
+    zlim <- range(x, na.rm = TRUE)
+  }
+
+  # -- 6. Color palette ----------------------------------------------------------
+  # When color = NULL, build theme-aware palettes where the background color
+  # maps to 0 (diverging) or to the "empty" end of single-sided ranges.
+  # Two variants are computed and passed to JS; the binding selects the one
+  # that matches the active theme at render time.
+  color_auto <- is.null(colormap)
+
+  if (color_auto) {
+    bg_light <- "#ffffff"
+    bg_dark <- "#181818" # default bg from theme_dark()
+
+    if (zlim[1L] < 0 && zlim[2L] > 0) {
+      # Diverging: teal(neg) -> bg -> orange(pos), midpoint pinned to 0
+      color_light <- diverging_palette(
+        rtemis_colors[["teal"]],
+        bg_light,
+        rtemis_colors[["orange"]],
+        zlim
+      )
+      color_dark <- diverging_palette(
+        rtemis_colors[["teal"]],
+        bg_dark,
+        rtemis_colors[["orange"]],
+        zlim
+      )
+    } else if (zlim[2L] <= 0) {
+      # All non-positive: orange -> bg
+      color_light <- grDevices::colorRampPalette(
+        c(rtemis_colors[["orange"]], bg_light)
+      )(101L)
+      color_dark <- grDevices::colorRampPalette(
+        c(rtemis_colors[["orange"]], bg_dark)
+      )(101L)
+    } else {
+      # All non-negative: bg -> teal
+      color_light <- grDevices::colorRampPalette(
+        c(bg_light, rtemis_colors[["teal"]])
+      )(101L)
+      color_dark <- grDevices::colorRampPalette(
+        c(bg_dark, rtemis_colors[["teal"]])
+      )(101L)
+    }
+
+    # Embed the light palette in the option; JS substitutes the dark one
+    # when a dark theme is active.
+    colormap <- color_light
+  } else {
+    color_light <- NULL
+    color_dark <- NULL
+  }
+
+  # -- 7. Heatmap data: list of [col_idx, row_idx, value] ------------------------
+  # x index = column (j-1), y index = row (i-1).
+  # With inverse = TRUE on the y-axis, row 0 appears at the top (matrix convention).
+  # NA values become NULL so ECharts leaves those cells uncolored.
+  data_list <- vector("list", n_rows * n_cols)
+  k <- 1L
+  for (i in seq_len(n_rows)) {
+    for (j in seq_len(n_cols)) {
+      val <- x[i, j]
+      value <- list(j - 1L, i - 1L, if (is.na(val)) NULL else val)
+      # Materialize visible labels so browser and static output consume JSON,
+      # without requiring a formatter callback at either render target.
+      data_list[[k]] <- if (show_values || !is.null(notes)) {
+        list(
+          value = value,
+          name = if (!is.null(notes)) notes[i, j] else "",
+          note = if (!is.null(notes)) notes[i, j] else "",
+          label = list(
+            formatter = if (show_notes) {
+              "{b}"
+            } else if (is.na(val)) {
+              ""
+            } else {
+              formatC(
+                val,
+                format = "f",
+                digits = value_digits,
+                decimal.mark = "."
+              )
+            }
+          )
+        )
+      } else {
+        value
+      }
+      k <- k + 1L
+    }
+  }
+
+  # -- 8. Layout margins (always computed; used for grid, title, and dimensions) -
+  # Base margins around the heatmap plot area:
+  #   left_px  — row labels (~8 px/char + padding)
+  #   right_px — vertical colorbar, or minimal padding
+  #   top_px   — chart title, or minimal padding
+  #   bot_px   — column labels (height varies with rotation)
+  #
+  # Dendrogram panels are placed outside the heatmap grid on the chosen side.
+  # hm_left/hm_right/hm_top/hm_bottom are the final heatmap grid margins that
+  # incorporate dendrogram panel widths/heights on each side.
+  #
+  # Row dendrogram side = "right" (default):
+  #   layout: [row labels | heatmap | row dendro | colorbar]
+  # Row dendrogram side = "left":
+  #   layout: [row dendro | row labels | heatmap | colorbar]
+  #
+  # Col dendrogram side = "top" (default):
+  #   layout: [col dendro] above [heatmap], col labels at bottom
+  # Col dendrogram side = "bottom":
+  #   col dendro is below the heatmap; col labels move to the top automatically
+  #   to avoid overlap with the dendrogram panel.
+  #
+  # With containLabel = FALSE (explicit pixel grids), title.left = hm_left gives
+  # pixel-precise alignment with the heatmap's left edge.
+  rotate <- if (max(nchar(cn)) > 4L) 45L else 0L
+  left_px <- min(20L + max(nchar(rn)) * 8L, 200L)
+  right_px <- if (show_colorbar && colorbar_orient == "vertical") 90L else 20L
+  top_px <- if (!is.null(title)) 40L else 10L
+  bot_px <- if (rotate > 0L) min(20L + max(nchar(cn)) * 5L, 140L) else 36L
+
+  # User-supplied margins override the auto-computed base values per-side. The
+  # downstream hm_left/hm_right/hm_top/hm_bottom and dendro-panel math compose
+  # on top of these, so overriding e.g. left widens the row-label gutter while
+  # keeping row dendro placement correct.
+  user_margins <- parse_margins(margins)
+  if (!is.null(user_margins[["left"]])) {
+    left_px <- user_margins[["left"]]
+  }
+  if (!is.null(user_margins[["right"]])) {
+    right_px <- user_margins[["right"]]
+  }
+  if (!is.null(user_margins[["top"]])) {
+    top_px <- user_margins[["top"]]
+  }
+  if (!is.null(user_margins[["bottom"]])) {
+    bot_px <- user_margins[["bottom"]]
+  }
+
+  row_track_px <- if (is.null(row_colors)) 0L else 12L * ncol(row_colors) + 4L
+  col_track_px <- if (is.null(col_colors)) 0L else 12L * ncol(col_colors) + 4L
+  left_px <- left_px + row_track_px
+  bot_px <- bot_px + col_track_px
+
+  # Determine which dendrogram panels to show
+  # (only possible when there are enough rows/cols to cluster)
+  dendro_rows_shown <- !is.null(row_h) && show_row_dendro
+  dendro_cols_shown <- !is.null(col_h) && show_col_dendro
+
+  # Heatmap grid margins: add dendro panel space on the appropriate side.
+  # When col dendro is on bottom, col labels migrate to the top so that
+  # the dendro panel sits cleanly between the heatmap and the chart edge.
+  col_labels_top <- dendro_cols_shown && dendro_col_side == "bottom"
+  hm_left <- left_px +
+    if (dendro_rows_shown && dendro_row_side == "left") dendro_row_width else 0L
+  hm_right <- right_px +
+    if (dendro_rows_shown && dendro_row_side == "right") {
+      dendro_row_width
+    } else {
+      0L
+    }
+  hm_top <- top_px +
+    (if (dendro_cols_shown && dendro_col_side == "top") {
+      dendro_col_height
+    } else {
+      0L
+    }) +
+    (if (col_labels_top) bot_px else 0L)
+  hm_bottom <- if (col_labels_top) {
+    dendro_col_height
+  } else {
+    bot_px +
+      if (dendro_cols_shown && dendro_col_side == "bottom") {
+        dendro_col_height
+      } else {
+        0L
+      }
+  }
+
+  if (is.null(square_cells)) {
+    square_cells <- (n_rows == n_cols)
+  }
+
+  # For square-cell heatmaps, compute R-side dimensions as a static fallback
+  # (e.g. knitr/quarto output where JS resize callbacks may not run).
+  # The JS binding also enforces square cells dynamically on init and resize,
+  # so these pixel values are used as the initial widget allocation.
+  if (square_cells && is.null(width) && is.null(height)) {
+    cell_px <- 40L
+    width <- n_cols * cell_px + hm_left + hm_right
+    height <- n_rows * cell_px + hm_top + hm_bottom
+  }
+
+  # -- 9. Tooltip: shows "row x col: value" -------------------------------------
+  cols_json <- jsonlite::toJSON(cn, auto_unbox = FALSE)
+  rows_json <- jsonlite::toJSON(rn, auto_unbox = FALSE)
+  tooltip_fmt <- htmlwidgets::JS(paste0(
+    "(function(){var cn=",
+    cols_json,
+    ";var rn=",
+    rows_json,
+    ";",
+    "function esc(s){return String(s).replace(/[&<>\"']/g,function(c){",
+    "return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c];});}",
+    "return function(p){if(!p.value)return '';",
+    "var v=p.value[2]==null?'NA':p.value[2].toFixed(",
+    value_digits,
+    ");",
+    "if(p.data&&p.data.label&&",
+    if (show_values) "true" else "false",
+    ")v=p.data.label.formatter;",
+    "return esc(rn[p.value[1]])+' \u00d7 '+esc(cn[p.value[0]])+': '+esc(v)",
+    "+(p.data&&p.data.note?'<br>'+esc(p.data.note):'');};})()"
+  ))
+
+  # -- 10. Optional in-cell value labels -----------------------------------------
+  label_opt <- if (show_values || show_notes) LabelOption(show = TRUE) else NULL
+
+  # -- 11. Assemble multi-grid ECharts option ------------------------------------
+  # Grid index assignments (depends on which dendro panels are shown):
+  #   both:     grid[0]=row dendro, grid[1]=col dendro, grid[2]=heatmap
+  #   row only: grid[0]=row dendro, grid[1]=heatmap
+  #   col only: grid[0]=col dendro, grid[1]=heatmap
+  #   neither:  grid[0]=heatmap (no gridIndex needed)
+
+  dcolor <- dendro_color %||% "#99999988"
+
+  hm_x_ax_idx <- hm_y_ax_idx <- 0L
+  if (!dendro_rows_shown && !dendro_cols_shown) {
+    # ── No dendrograms: single grid, unchanged from original logic ───────────
+    grids <- Grid(
+      left = left_px,
+      right = right_px,
+      top = top_px,
+      bottom = bot_px,
+      contain_label = FALSE
+    )
+    x_axes <- Axis(
+      type = "category",
+      data = as.list(cn),
+      split_area = SplitArea(show = FALSE),
+      axis_line = AxisLine(show = FALSE),
+      axis_label = AxisLabel(rotate = rotate, margin = 8L + col_track_px),
+      boundary_gap = TRUE
+    )
+    y_axes <- Axis(
+      type = "category",
+      data = as.list(rn),
+      inverse = TRUE,
+      split_area = SplitArea(show = FALSE),
+      axis_line = AxisLine(show = FALSE),
+      axis_label = AxisLabel(margin = 8L + row_track_px),
+      boundary_gap = TRUE
+    )
+    series_list <- list(HeatmapSeries(data = data_list, label = label_opt))
+  } else {
+    # ── One or two dendrogram panels: multiple grids ─────────────────────────
+    # Compute dendrogram segment data (needed for custom series renderItem)
+    row_dendro <- if (dendro_rows_shown) {
+      hclust_to_dendro_data(
+        row_h,
+        uniform = dendro_uniform,
+        leaf_positions = row_positions
+      )
+    } else {
+      NULL
+    }
+    col_dendro <- if (dendro_cols_shown) {
+      hclust_to_dendro_data(
+        col_h,
+        uniform = dendro_uniform,
+        leaf_positions = col_positions
+      )
+    } else {
+      NULL
+    }
+
+    # Determine ECharts axis/grid indices for the heatmap series
+    hm_grid_idx <- if (dendro_rows_shown && dendro_cols_shown) 2L else 1L
+    hm_x_ax_idx <- hm_grid_idx # xAxis array mirrors grid ordering
+    hm_y_ax_idx <- hm_grid_idx # yAxis array mirrors grid ordering
+
+    # Build the heatmap grid
+    hm_grid <- Grid(
+      left = hm_left,
+      right = hm_right,
+      top = hm_top,
+      bottom = hm_bottom,
+      contain_label = FALSE
+    )
+
+    # Axes for the heatmap grid (always last in their respective arrays).
+    # When col labels migrate to the top (dendro_col_side = "bottom"), the
+    # x-axis position is "top" so labels appear above the heatmap grid.
+    hm_x_axis <- Axis(
+      type = "category",
+      data = as.list(cn),
+      split_area = SplitArea(show = FALSE),
+      axis_line = AxisLine(show = FALSE),
+      axis_label = AxisLabel(rotate = rotate, margin = 8L + col_track_px),
+      position = if (col_labels_top) "top" else NULL,
+      boundary_gap = TRUE,
+      grid_index = hm_grid_idx
+    )
+    hm_y_axis <- Axis(
+      type = "category",
+      data = as.list(rn),
+      inverse = TRUE,
+      split_area = SplitArea(show = FALSE),
+      axis_line = AxisLine(show = FALSE),
+      axis_label = AxisLabel(margin = 8L + row_track_px),
+      boundary_gap = TRUE,
+      grid_index = hm_grid_idx
+    )
+
+    # Named renderers keep the resolved option portable JSON. Both targets
+    # share the U-shape geometry in inst/htmlwidgets/lib/draw/renderers.js.
+    # Clip leaf stubs below the displayed height-axis minimum to their own
+    # panel so they cannot extend across adjacent heatmap cells.
+    # Build reusable dendro grids and position axes.
+    #
+    # Row dendro grid: placed on the left (root far-left, leaves adj. to heatmap)
+    # or right (leaves adj. to heatmap, root far-right). The height x-axis is
+    # inverse=TRUE for "left" so the root is on the far-left side.
+    row_dendro_grid <- if (dendro_row_side == "right") {
+      Grid(
+        right = right_px,
+        width = dendro_row_width,
+        top = hm_top,
+        bottom = hm_bottom
+      )
+    } else {
+      Grid(
+        left = 0L,
+        width = dendro_row_width,
+        top = hm_top,
+        bottom = hm_bottom
+      )
+    }
+    row_height_x_axis <- function(idx) {
+      Axis(
+        type = "value",
+        inverse = (dendro_row_side == "left"),
+        show = FALSE,
+        min = dendro_axis_min(
+          row_dendro[["min_height"]],
+          row_dendro[["max_height"]]
+        ),
+        max = row_dendro[["max_height"]],
+        grid_index = idx
+      )
+    }
+
+    # Col dendro grid: placed on top (root far-top, leaves adj. to heatmap)
+    # or bottom (leaves adj. to heatmap, root far-bottom). The height y-axis is
+    # inverse=TRUE for "bottom" so the root is at the bottom.
+    col_dendro_grid <- if (dendro_col_side == "top") {
+      Grid(
+        left = hm_left,
+        right = hm_right,
+        top = top_px,
+        height = dendro_col_height
+      )
+    } else {
+      Grid(
+        left = hm_left,
+        right = hm_right,
+        bottom = 0L,
+        height = dendro_col_height
+      )
+    }
+    col_height_y_axis <- function(idx) {
+      Axis(
+        type = "value",
+        show = FALSE,
+        inverse = (dendro_col_side == "bottom"),
+        min = dendro_axis_min(
+          col_dendro[["min_height"]],
+          col_dendro[["max_height"]]
+        ),
+        max = col_dendro[["max_height"]],
+        grid_index = idx
+      )
+    }
+
+    # Assemble grids, axes, and series lists depending on which panels are shown
+    if (dendro_rows_shown && dendro_cols_shown) {
+      # grid[0]=row dendro, grid[1]=col dendro, grid[2]=heatmap
+      grids <- list(row_dendro_grid, col_dendro_grid, hm_grid)
+      x_axes <- list(
+        # [0] row dendro: height axis
+        row_height_x_axis(0L),
+        # [1] col dendro: col position axis (integer positions 0..n-1 align
+        # with category cell centers in the heatmap grid)
+        Axis(
+          type = "value",
+          min = -0.5,
+          max = n_cols - 0.5,
+          show = FALSE,
+          grid_index = 1L
+        ),
+        hm_x_axis
+      )
+      y_axes <- list(
+        # [0] row dendro: row position axis (integer positions 0..n-1 align
+        # with category cell centers in the heatmap grid)
+        Axis(
+          type = "value",
+          min = -0.5,
+          max = n_rows - 0.5,
+          inverse = TRUE,
+          show = FALSE,
+          grid_index = 0L
+        ),
+        # [1] col dendro: height axis
+        col_height_y_axis(1L),
+        hm_y_axis
+      )
+      series_list <- list(
+        list(
+          type = "custom",
+          xAxisIndex = 0L,
+          yAxisIndex = 0L,
+          data = row_dendro[["data"]],
+          silent = TRUE,
+          clip = TRUE,
+          animation = FALSE,
+          renderItem = "rtemis.dendrogram.v1",
+          itemPayload = Filter(
+            Negate(is.null),
+            list(
+              orientation = "row",
+              color = dcolor,
+              colors = row_branch_colors
+            )
+          )
+        ),
+        list(
+          type = "custom",
+          xAxisIndex = 1L,
+          yAxisIndex = 1L,
+          data = col_dendro[["data"]],
+          silent = TRUE,
+          clip = TRUE,
+          animation = FALSE,
+          renderItem = "rtemis.dendrogram.v1",
+          itemPayload = Filter(
+            Negate(is.null),
+            list(
+              orientation = "column",
+              color = dcolor,
+              colors = col_branch_colors
+            )
+          )
+        ),
+        HeatmapSeries(
+          data = data_list,
+          label = label_opt,
+          x_axis_index = hm_x_ax_idx,
+          y_axis_index = hm_y_ax_idx
+        )
+      )
+    } else if (dendro_rows_shown) {
+      # grid[0]=row dendro, grid[1]=heatmap
+      grids <- list(row_dendro_grid, hm_grid)
+      x_axes <- list(row_height_x_axis(0L), hm_x_axis)
+      y_axes <- list(
+        Axis(
+          type = "value",
+          min = -0.5,
+          max = n_rows - 0.5,
+          inverse = TRUE,
+          show = FALSE,
+          grid_index = 0L
+        ),
+        hm_y_axis
+      )
+      series_list <- list(
+        list(
+          type = "custom",
+          xAxisIndex = 0L,
+          yAxisIndex = 0L,
+          data = row_dendro[["data"]],
+          silent = TRUE,
+          clip = TRUE,
+          animation = FALSE,
+          renderItem = "rtemis.dendrogram.v1",
+          itemPayload = Filter(
+            Negate(is.null),
+            list(
+              orientation = "row",
+              color = dcolor,
+              colors = row_branch_colors
+            )
+          )
+        ),
+        HeatmapSeries(
+          data = data_list,
+          label = label_opt,
+          x_axis_index = hm_x_ax_idx,
+          y_axis_index = hm_y_ax_idx
+        )
+      )
+    } else {
+      # grid[0]=col dendro, grid[1]=heatmap
+      grids <- list(col_dendro_grid, hm_grid)
+      x_axes <- list(
+        Axis(
+          type = "value",
+          min = -0.5,
+          max = n_cols - 0.5,
+          show = FALSE,
+          grid_index = 0L
+        ),
+        hm_x_axis
+      )
+      y_axes <- list(col_height_y_axis(0L), hm_y_axis)
+      series_list <- list(
+        list(
+          type = "custom",
+          xAxisIndex = 0L,
+          yAxisIndex = 0L,
+          data = col_dendro[["data"]],
+          silent = TRUE,
+          clip = TRUE,
+          animation = FALSE,
+          renderItem = "rtemis.dendrogram.v1",
+          itemPayload = Filter(
+            Negate(is.null),
+            list(
+              orientation = "column",
+              color = dcolor,
+              colors = col_branch_colors
+            )
+          )
+        ),
+        HeatmapSeries(
+          data = data_list,
+          label = label_opt,
+          x_axis_index = hm_x_ax_idx,
+          y_axis_index = hm_y_ax_idx
+        )
+      )
+    }
+  }
+
+  heatmap_series_index <- length(series_list) - 1L
+  if (show_notes) {
+    # Resolve text widths at native layout time, in both the browser and SVG.
+    series_list[[heatmap_series_index + 1L]] <- c(
+      to_list(series_list[[heatmap_series_index + 1L]]),
+      list(rtemisCellNotes = TRUE)
+    )
+  }
+  for (direction in c("row", "column")) {
+    tracks <- if (direction == "row") row_colors else col_colors
+    if (is.null(tracks)) {
+      next
+    }
+    track_data <- lapply(seq_len(nrow(tracks)), function(i) list(i - 1L))
+    series_list[[length(series_list) + 1L]] <- list(
+      type = "custom",
+      renderItem = "rtemis.heatmap_tracks.v1",
+      xAxisIndex = hm_x_ax_idx,
+      yAxisIndex = hm_y_ax_idx,
+      data = track_data,
+      silent = TRUE,
+      clip = FALSE,
+      animation = FALSE,
+      itemPayload = list(
+        orientation = direction,
+        top = col_labels_top,
+        colors = lapply(seq_len(nrow(tracks)), function(i) as.list(tracks[i, ]))
+      )
+    )
+  }
+
+  opt <- EChartsOption(
+    title = if (!is.null(title)) Title(text = title, left = hm_left) else NULL,
+    tooltip = Tooltip(trigger = "item", formatter = tooltip_fmt),
+    grid = grids,
+    x_axis = x_axes,
+    y_axis = y_axes,
+    visual_map = VisualMap(
+      type = "continuous",
+      min = zlim[[1L]],
+      max = zlim[[2L]],
+      # Match colorbar label precision to the cell-value precision so that the
+      # min/max labels and the draggable-handle tooltip are never rounded to
+      # whole numbers (ECharts default precision = 0).
+      precision = value_digits,
+      calculable = TRUE,
+      show = show_colorbar,
+      orient = colorbar_orient,
+      in_range = list(color = as.list(colormap)),
+      # Vertical: pin to the right edge, centered with the plot area.
+      # Horizontal: centered at the bottom.
+      right = if (colorbar_orient == "vertical") "right" else NULL,
+      top = if (colorbar_orient == "vertical") "middle" else NULL,
+      left = if (colorbar_orient == "horizontal") "center" else NULL,
+      bottom = if (colorbar_orient == "horizontal") "bottom" else NULL
+    ),
+    series = series_list
+  )
+
+  opt@visual_map <- c(
+    to_list(opt@visual_map),
+    list(seriesIndex = heatmap_series_index)
+  )
+
+  # Pass square-cell layout parameters to the JS binding so it can enforce
+  # square cells dynamically on init and resize (viewer/browser resize events).
+  # hm_left/hm_right/hm_top/hm_bottom are the actual heatmap grid margins so
+  # squareCellHeight() measures only the heatmap grid, not the dendro panels.
+  heatmap_meta <- list(
+    legendReserveRight = if (
+      show_colorbar &&
+        colorbar_orient == "vertical" &&
+        is.null(user_margins[["right"]])
+    ) {
+      70
+    } else {
+      0
+    }
+  )
+  if (square_cells) {
+    heatmap_meta <- c(
+      heatmap_meta,
+      list(
+        squareCells = TRUE,
+        nRows = n_rows,
+        nCols = n_cols,
+        leftPx = hm_left,
+        rightPx = hm_right,
+        topPx = hm_top,
+        botPx = hm_bottom
+      )
+    )
+  }
+  # Pass both theme-matched color arrays so JS can select the right one.
+  if (color_auto) {
+    heatmap_meta <- c(
+      heatmap_meta,
+      list(
+        colorLight = as.list(color_light),
+        colorDark = as.list(color_dark)
+      )
+    )
+  }
+
+  list(option = opt, render = list(meta = heatmap_meta))
+} # /rtemis.draw::heatmap_option
+
+
+#' Draw a Heatmap
+#'
+#' Quick heatmap from a numeric matrix. Designed to handle all common use cases
+#' including correlation matrices (square cells, diverging color scale),
+#' general rectangular heatmaps, and clustered heatmaps.
+#'
+#' Color encoding is driven by a continuous [VisualMap] component.
+#' Hierarchical clustering is performed in R via [hclust()]; rows and columns
+#' are reordered accordingly.  When `cluster_rows` or `cluster_cols` is `TRUE`
+#' (and the corresponding `show_*_dendro` flag is not `FALSE`), a dendrogram
+#' panel is rendered alongside the heatmap as an ECharts custom series.
+#'
+#' @param x Numeric matrix: Input data. Rows map to y-axis categories and columns
+#'   to x-axis categories.
+#' @param row_names Optional Character: Row labels. Defaults to `rownames(x)`, or
+#'   `"1"`, `"2"`, ... when row names are absent.
+#' @param col_names Optional Character: Column labels. Defaults to `colnames(x)`.
+#' @param triangle Optional Character \{"upper", "lower"\}: Mask one triangle of the
+#'   matrix to `NA`. `"upper"` keeps only the upper triangle; `"lower"` keeps
+#'   only the lower triangle. The diagonal is always masked, as it is
+#'   uninformative for symmetric matrices (e.g. always 1 for correlations).
+#' @param cluster_rows Logical: Whether to reorder rows via hierarchical clustering.
+#' @param cluster_cols Logical: Whether to reorder columns via hierarchical clustering.
+#' @param dist_method Character: Distance method passed to [stats::dist()].
+#'   Common values: `"euclidean"`, `"manhattan"`.
+#' @param hclust_method Character: Linkage method passed to [stats::hclust()].
+#'   Common values: `"complete"`, `"ward.D2"`, `"average"`.
+#' @param show_row_dendro Logical: Whether to render the row dendrogram panel
+#'   when `cluster_rows = TRUE`. Set to `FALSE` to reorder rows but suppress the
+#'   visual dendrogram.
+#' @param show_col_dendro Logical: Whether to render the col dendrogram panel
+#'   when `cluster_cols = TRUE`.
+#' @param dendro_row_width Optional Numeric `[1, Inf)`: Pixel width of the row
+#'   dendrogram panel (between row labels and the heatmap grid).
+#' @param dendro_col_height Optional Numeric `[1, Inf)`: Pixel height of the
+#'   col dendrogram panel (between the chart title and the heatmap grid).
+#' @param dendro_color Optional Character: Stroke color for dendrogram branch
+#'   lines. `NULL` (default) uses a semi-transparent gray (`"#99999988"`),
+#'   which works in both light and dark themes.
+#' @param dendro_uniform Logical: Whether to render dendrograms with uniform level
+#'   heights — each merge step occupies equal visual space — rather than heights
+#'   proportional to actual merge distances. `FALSE` (default) preserves merge
+#'   distances in the visual scaling.
+#' @param dendro_row_side Character \{"right", "left"\}: Side of the heatmap on which
+#'   the row dendrogram is placed. `"right"` (default) keeps row labels on the left
+#'   with the dendrogram on the right for a clean, symmetric layout.
+#' @param dendro_col_side Character \{"top", "bottom"\}: Side of the heatmap on which
+#'   the column dendrogram is placed. `"top"` (default) places it above the heatmap.
+#'   `"bottom"` automatically moves column labels to the top.
+#' @param square_cells Optional Logical: Whether to compute widget dimensions so
+#'   cells are square in the browser and SVG exports. In panels and exports,
+#'   the matrix and dendrograms fit within the allocated canvas.
+#'   `NULL` (default) enables this automatically for square
+#'   matrices (e.g. correlation matrices). When `TRUE`, both `width` and `height`
+#'   are calculated from the number of cells; supply explicit `width`/`height` to
+#'   override.
+#' @param colormap Optional Character: Color palette — a vector of 2 or more colors
+#'   defining the continuous color scale from `zlim[1]` to `zlim[2]`. When `NULL`
+#'   (default) a diverging teal–background–orange palette is used when data spans
+#'   zero (with the background color pinned exactly at 0, even for asymmetric
+#'   ranges), otherwise a sequential single-hue palette is used. Two variants
+#'   (light / dark) are computed automatically and the JS binding selects the
+#'   correct one based on the active theme.
+#' @param zlim Optional Numeric: Length-2 vector `c(min, max)` for the color scale.
+#'   Defaults to the observed data range. For correlation matrices, `c(-1, 1)` is
+#'   recommended.
+#' @param row_tree,col_tree Optional hclust, dendrogram or List: Supplied trees.
+#'   A plain tree record contains `merge`, `height`, `order` and optional `labels`.
+#'   Labeled leaves match original matrix dimnames; unlabeled trees are positional.
+#'   Supplied trees determine order and take precedence over computed clustering.
+#'   Triangle masking is unavailable with supplied trees.
+#' @param cell_notes Optional Character matrix: Literal cell notes for hover.
+#'   Named dimensions align to original matrix identities; otherwise positional.
+#' @param row_colors,col_colors Optional Character vector, matrix or Data frame:
+#'   R colors, one row per matrix row/column and one column per annotation track.
+#'   Row names, when supplied, match the original matrix identities.
+#' @param show_notes Logical: Print cell notes instead of numeric value labels.
+#'   Long notes truncate to the cell width; hover retains the full text.
+#' @param row_cut,col_cut Optional Integer: Number of clusters for branch coloring.
+#'   A cut requires a supplied or computed tree. Cross-cluster branches stay gray
+#'   (or `dendro_color`); within-cluster branches share a deterministic color.
+#' @param show_values Logical: Whether to print the cell value as a label inside
+#'   each cell.
+#' @param value_digits Integer: Decimal places used in cell labels and the tooltip.
+#' @param show_colorbar Logical: Whether to display the continuous color-scale bar.
+#' @param colorbar_orient Character \{"vertical", "horizontal"\}: Orientation of the
+#'   color bar.
+#' @param title Optional Character: Chart title.
+#' @param theme Optional [Theme]: Theme override. `NULL` auto-detects light/dark mode.
+#' @param margins Optional Named numeric vector or named list: Override the
+#'   auto-computed heatmap plot-area margins in pixels (or percentage strings)
+#'   for any of `"top"`, `"right"`, `"bottom"`, `"left"` — e.g.
+#'   `c(left = 200)` to widen the left gutter for long row labels. Unspecified
+#'   sides use the values computed from label lengths, title, colorbar, and
+#'   dendrogram panels. See [draw_line()] for the general convention.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit DOM element ID for the widget
+#'   container. `NULL` lets htmlwidgets generate one.
+#' @param filename Optional Character: If provided, save the widget to this file via
+#'   [save_drawing()].
+#' @return htmlwidget: Widget object.
+#' @export
+#'
+#' @examples
+#' draw_heatmap(cor(mtcars[, 1:5]), title = "Correlation")
+#' @inheritParams draw_line legend_position legend_placement
+draw_heatmap <- function(
+  x,
+  row_names = NULL,
+  col_names = NULL,
+  triangle = NULL,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  dist_method = "euclidean",
+  hclust_method = "complete",
+  show_row_dendro = TRUE,
+  show_col_dendro = TRUE,
+  dendro_row_width = 60,
+  dendro_col_height = 60,
+  dendro_color = NULL,
+  dendro_uniform = FALSE,
+  dendro_row_side = "right",
+  dendro_col_side = "top",
+  square_cells = NULL,
+  colormap = NULL,
+  zlim = NULL,
+  show_values = FALSE,
+  value_digits = 2L,
+  show_colorbar = TRUE,
+  colorbar_orient = "vertical",
+  title = NULL,
+  theme = NULL,
+  margins = NULL,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL,
+  legend_position = if (colorbar_orient == "horizontal") "bottom" else "right",
+  legend_placement = "outside",
+  row_tree = NULL,
+  col_tree = NULL,
+  cell_notes = NULL,
+  row_colors = NULL,
+  col_colors = NULL,
+  show_notes = FALSE,
+  row_cut = NULL,
+  col_cut = NULL
+) {
+  built <- heatmap_option(
+    width = width,
+    height = height,
+    x = x,
+    row_names = row_names,
+    col_names = col_names,
+    triangle = triangle,
+    cluster_rows = cluster_rows,
+    cluster_cols = cluster_cols,
+    dist_method = dist_method,
+    hclust_method = hclust_method,
+    show_row_dendro = show_row_dendro,
+    show_col_dendro = show_col_dendro,
+    dendro_row_width = dendro_row_width,
+    dendro_col_height = dendro_col_height,
+    dendro_color = dendro_color,
+    dendro_uniform = dendro_uniform,
+    dendro_row_side = dendro_row_side,
+    dendro_col_side = dendro_col_side,
+    square_cells = square_cells,
+    colormap = colormap,
+    zlim = zlim,
+    show_values = show_values,
+    value_digits = value_digits,
+    show_colorbar = show_colorbar,
+    colorbar_orient = colorbar_orient,
+    title = title,
+    margins = margins,
+    row_tree = row_tree,
+    col_tree = col_tree,
+    cell_notes = cell_notes,
+    row_colors = row_colors,
+    col_colors = col_colors,
+    show_notes = show_notes,
+    row_cut = row_cut,
+    col_cut = col_cut
+  )
+
+  draw(
+    built[["option"]],
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename,
+    meta = c(
+      legend_meta(legend_position, legend_placement),
+      built[["render"]][["meta"]],
+      list(legendTarget = "visualMap")
+    )
+  )
+}
+
+# -- draw_sankey ----------------------------------------------------------------
+
+# %% .sankey_margins() ----
+#' Space a Sankey needs around its plotting box so no label is cut off
+#'
+#' A node's label is drawn to the right of it, so the labels of the last column
+#' run past the edge of the chart and are clipped. There is no way to measure
+#' text before the browser has it, so the width is estimated from the longest
+#' label: a proportional face averages a little over half its point size per
+#' character.
+#'
+#' The estimate is capped, because a label long enough to need most of the
+#' canvas would leave no canvas for the diagram. Pass `margins` to set any side
+#' exactly, which is what a static export wants.
+#'
+#' @param links data.frame: Links, with `source` and `target`.
+#' @param margins Optional named list or numeric: Any of `left`, `right`, `top`,
+#'   `bottom`, in pixels or as a CSS width. Sides not named are derived.
+#' @param font_size Numeric: Label font size in pixels.
+#' @param width Optional Numeric: Chart width, used to cap the estimate.
+#'
+#' @return Named list of `left`, `right`, `top`, `bottom`.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+.sankey_margins <- function(
+  links,
+  margins = NULL,
+  font_size = 12,
+  width = NULL
+) {
+  src <- as.character(links[["source"]])
+  tgt <- as.character(links[["target"]])
+  terminal <- setdiff(tgt, src)
+  longest <- if (length(terminal)) max(nchar(terminal)) else 0L
+  canvas <- if (is.numeric(width) && length(width) == 1L) width else 1200
+  # 0.52 em per character is close for the system UI faces these charts use,
+  # and erring wide costs plot area while erring narrow costs the label.
+  estimate <- ceiling(longest * 0.52 * font_size) + 24
+  auto <- list(
+    left = 12,
+    right = max(24, min(estimate, floor(canvas * 0.45))),
+    top = 48,
+    bottom = 24
+  )
+  if (is.null(margins)) {
+    return(auto)
+  }
+  if (!is.list(margins)) {
+    margins <- as.list(margins)
+  }
+  unknown <- setdiff(names(margins), names(auto))
+  if (length(unknown) > 0L) {
+    abort(
+      "`margins` names must be among left, right, top, bottom. Got: ",
+      paste(unknown, collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  utils::modifyList(auto, margins)
+}
+
+#' Build the ECharts option for a Sankey diagram
+#'
+#' The single implementation shared by [draw_sankey()], which resolves its arguments
+#' from vectors, and `compile()` on the corresponding [ChartConfig], which
+#' resolves them from a data frame. The render targets stay with the caller.
+#'
+#' @inheritParams draw_sankey
+#'
+#' @return [EChartsOption]: The option object.
+#'
+#' @author EDG
+#' @keywords internal
+#' @noRd
+sankey_option <- function(
+  links,
+  orient = "horizontal",
+  node_width = NULL,
+  node_gap = NULL,
+  node_align = NULL,
+  title = NULL,
+  palette = NULL,
+  link_color = "source",
+  link_opacity = 0.45,
+  margins = NULL,
+  label_font_size = 12,
+  width = NULL
+) {
+  rtemis.core::check_tabular(links)
+  required_cols <- c("source", "target", "value")
+  missing_cols <- setdiff(required_cols, names(links))
+  if (length(missing_cols) > 0L) {
+    abort(
+      "`links` must have columns ",
+      paste(required_cols, collapse = ", "),
+      "; missing: ",
+      paste(missing_cols, collapse = ", "),
+      ".",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+
+  # Coerce to character: factor columns with different levels produce an
+  # integer vector when concatenated with c().
+  node_names <- unique(
+    c(as.character(links[["source"]]), as.character(links[["target"]]))
+  )
+  # Convert links data.frame rows to a list of named lists
+  edge_list <- lapply(seq_len(nrow(links)), function(i) {
+    list(
+      source = as.character(links[["source"]][[i]]),
+      target = as.character(links[["target"]][[i]]),
+      value = links[["value"]][[i]]
+    )
+  })
+
+  # ECharts ignores a palette longer than the node count; trim (or cycle) to
+  # exactly one entry per node. unname() prevents named vectors from
+  # serializing as a JSON object instead of an array.
+  palette <- unname(rep_len(palette %||% rtemis_colors, length(node_names)))
+  box <- .sankey_margins(links, margins, label_font_size, width)
+  if (identical(orient, "vertical")) {
+    # Vertical flows need space above/below nodes; the shared renderer measures
+    # wrapped labels against native node widths for browser and SVG surfaces.
+    box <- utils::modifyList(
+      list(left = 12, right = 12, top = 48, bottom = 24),
+      if (is.null(margins)) list() else as.list(margins)
+    )
+  }
+
+  # The color is carried on each node rather than left to the chart-level
+  # `color` array: a theme's series itemStyle takes precedence over that array,
+  # which paints every node one color and leaves the palette showing only on the
+  # links. A per-datum itemStyle wins over both, as in draw_gantt().
+  nodes <- lapply(seq_along(node_names), function(i) {
+    list(
+      name = node_names[[i]],
+      itemStyle = list(color = palette[[i]])
+    )
+  })
+  opt <- EChartsOption(
+    title = if (!is.null(title)) Title(text = title, left = "center") else NULL,
+    tooltip = Tooltip(trigger = "item"),
+    color = palette,
+    series = SankeySeries(
+      data = nodes,
+      links = edge_list,
+      orient = orient,
+      node_width = node_width,
+      node_gap = node_gap,
+      node_align = node_align,
+      # Links take the color of the node they leave, which is what lets a
+      # reader follow one source across a diagram. Without it the theme's own
+      # link color applies and the palette shows only on the nodes.
+      line_style = list(color = link_color, opacity = link_opacity),
+      label = LabelOption(text_style = TextStyle(font_size = label_font_size)),
+      left = box[["left"]],
+      right = box[["right"]],
+      top = box[["top"]],
+      bottom = box[["bottom"]]
+    )
+  )
+
+  opt
+} # /rtemis.draw::sankey_option
+
+
+#' Draw a Sankey Diagram
+#'
+#' Sankey diagram from a data frame of directed links. Node names are derived
+#' automatically from the unique values in the `source` and `target` columns;
+#' no separate node list is required.
+#'
+#' @param links data.frame: Directed links with columns `source` (Character),
+#'   `target` (Character), and `value` (Numeric).
+#' @param orient Optional Character \{"horizontal", "vertical"\}: Flow direction.
+#' @param node_width Optional Numeric `[0, Inf)`: Node rectangle width in pixels.
+#' @param node_gap Optional Numeric `[0, Inf)`: Vertical gap between nodes in pixels.
+#' @param node_align Optional Character \{"justify", "left", "right"\}: Node
+#'   alignment within each column.
+#' @param title Optional Character: Chart title.
+#' @param palette Optional Character: Node color palette — a single color string or
+#'   a character vector that overrides the theme palette for this chart.
+#' @param link_color Character \{"source", "target", "gradient"\} or a color:
+#'   How ribbons are colored. `"source"`, the default, gives each ribbon the
+#'   color of the node it leaves, which is what lets a reader follow one source
+#'   across the diagram.
+#' @param link_opacity Numeric `[0, 1]`: Ribbon opacity. Below 1 so that
+#'   crossing ribbons blend rather than hide one another.
+#' @param margins Optional named list or numeric: Space around the plotting box,
+#'   as any of `left`, `right`, `top`, `bottom` in pixels or as a CSS width.
+#'   Sides left unnamed are derived from the labels: a node's label is drawn to
+#'   its right, so the last column needs room or its labels are clipped. Set
+#'   them explicitly when preparing a static export, where the exact canvas is
+#'   known.
+#' @param label_font_size Numeric: Node label font size in pixels. Also what the
+#'   derived margins are estimated from.
+#' @param theme Optional [Theme]: Theme override.
+#' @param width Optional Character or Numeric: Widget width.
+#' @param height Optional Character or Numeric: Widget height.
+#' @param element_id Optional Character: Explicit DOM element ID for the widget
+#'   container. `NULL` lets htmlwidgets generate one.
+#' @param filename Optional Character: If provided, save the widget to this file
+#'   via [save_drawing()].
+#' @return htmlwidget: Widget object.
+#' @examples
+#' links <- data.frame(
+#'   source = c("A", "A", "B", "C"),
+#'   target = c("B", "C", "D", "D"),
+#'   value  = c(8, 4, 6, 3)
+#' )
+#' draw_sankey(links)
+#' @export
+draw_sankey <- function(
+  links,
+  orient = "horizontal",
+  node_width = NULL,
+  node_gap = NULL,
+  node_align = NULL,
+  title = NULL,
+  palette = NULL,
+  link_color = "source",
+  link_opacity = 0.45,
+  margins = NULL,
+  label_font_size = 12,
+  theme = NULL,
+  width = NULL,
+  height = NULL,
+  element_id = NULL,
+  filename = NULL
+) {
+  opt <- sankey_option(
+    links = links,
+    orient = orient,
+    node_width = node_width,
+    node_gap = node_gap,
+    node_align = node_align,
+    title = title,
+    palette = palette,
+    link_color = link_color,
+    link_opacity = link_opacity,
+    margins = margins,
+    label_font_size = label_font_size,
+    width = width
+  )
+
+  draw(
+    opt,
+    theme = theme,
+    width = width,
+    height = height,
+    element_id = element_id,
+    filename = filename
+  )
+}
+
+
+#' Normalize bar table/vector input and stable category ordering
+#' @inheritParams draw_bar
+#' @return List: Categories, value series, and their row permutation.
+#' @keywords internal
+#' @noRd
+bar_input <- new_generic("bar_input", "x")
+method(bar_input, class_any) <- function(x, y = NULL, order = "input") {
+  order <- BarConfig(order = order)@order
+  if (inherits(y, "table") && length(dim(y)) == 1L) {
+    y <- as.vector(y)
+  }
+  if (is.data.frame(x) && is.null(y)) {
+    if (!all(vapply(x, is.numeric, logical(1)))) {
+      abort(
+        "Supply numeric columns for bar values.",
+        class = c("rtemis_type_error", "rtemis_input_error")
+      )
+    }
+    x <- as.matrix(x)
+  }
+  if (is.null(y)) {
+    if (length(dim(x)) == 2L) {
+      if (!is.numeric(x)) {
+        abort(
+          "Supply a numeric bar matrix or table.",
+          class = c("rtemis_type_error", "rtemis_input_error")
+        )
+      }
+      y <- setNames(
+        lapply(seq_len(ncol(x)), function(i) as.numeric(x[, i])),
+        colnames(x) %||% paste("Series", seq_len(ncol(x)))
+      )
+      x <- rownames(x) %||% as.character(seq_len(nrow(x)))
+    } else {
+      y <- as.vector(x)
+      x <- if (inherits(x, "table")) {
+        dimnames(x)[[1]]
+      } else {
+        names(x) %||% as.character(seq_along(x))
+      }
+    }
+  }
+  category_list <- is.list(x)
+  x <- as.character(x)
+  values <- if (is.list(y)) y else list(y)
+  if (
+    !length(x) ||
+      anyNA(x) ||
+      anyDuplicated(x) ||
+      !length(values) ||
+      any(
+        !vapply(
+          values,
+          function(v) {
+            is.numeric(v) &&
+              !is.complex(v) &&
+              is.null(dim(v)) &&
+              length(v) == length(x) &&
+              !any(is.infinite(v))
+          },
+          logical(1)
+        )
+      )
+  ) {
+    abort(
+      "Supply distinct categories and equally sized numeric bar series, allowing NA.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  if (
+    is.list(y) &&
+      (is.null(names(y)) ||
+        anyNA(names(y)) ||
+        any(!nzchar(names(y))) ||
+        anyDuplicated(names(y)))
+  ) {
+    abort(
+      "Name every bar series distinctly.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  index <- if (order == "input") {
+    seq_along(x)
+  } else {
+    base::order(
+      Reduce(`+`, values),
+      decreasing = order == "decreasing",
+      na.last = TRUE
+    )
+  }
+  list(
+    x = if (category_list) as.list(x[index]) else x[index],
+    y = if (is.list(y)) lapply(y, `[`, index) else y[index],
+    index = index
+  )
+}
+
+#' Normalize and validate pie slices without recycling labels
+#' @inheritParams draw_pie
+#' @return List: Numeric values and literal labels.
+#' @keywords internal
+#' @noRd
+pie_input <- new_generic("pie_input", "values")
+method(pie_input, class_any) <- function(values, labels = NULL) {
+  if (is.data.frame(values) || is.matrix(values)) {
+    if (ncol(values) != 2L || !is.null(labels)) {
+      abort(
+        "Supply a two-column label/value table alone, or separate values and labels.",
+        class = c("rtemis_value_error", "rtemis_input_error")
+      )
+    }
+    labels <- values[, 1]
+    values <- values[, 2]
+  }
+  labels <- labels %||% names(values) %||% paste("Slice", seq_along(values))
+  if (
+    !is.numeric(values) ||
+      is.complex(values) ||
+      !is.null(dim(values)) ||
+      !length(values) ||
+      any(!is.finite(values)) ||
+      any(values < 0) ||
+      !is.finite(sum(values)) ||
+      sum(values) <= 0 ||
+      length(labels) != length(values) ||
+      anyNA(labels) ||
+      anyDuplicated(as.character(labels))
+  ) {
+    abort(
+      "Supply finite nonnegative slice values with a positive total and distinct, matching labels.",
+      class = c("rtemis_value_error", "rtemis_input_error")
+    )
+  }
+  list(values = unname(values), labels = as.character(labels))
+}

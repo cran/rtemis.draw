@@ -1,0 +1,62 @@
+Package: rtemis.draw
+Title: Schema-Driven Interactive Charts, Network Graphs, and Maps
+Version: 0.5.3
+Date: 2026-09-28
+Authors@R: 
+    person(given = "E.D.", family = "Gennatas", role = c("aut", "cre", "cph"),
+           email = "gennatas@gmail.com",
+           comment = c(ORCID = "0000-0001-9280-3609"))
+Description: Create interactive statistical charts, network graphs and
+    choropleth maps. Charts are rendered with the 'ECharts' 'JavaScript'
+    library, networks with 'Sigma.js' and maps with 'MapLibre GL JS'.
+    A high-level interface of plotting functions builds a complete
+    visualization from data in a single call, while a low-level interface
+    gives full control over every option. Both are based on the same
+    type-checked and validated 'S7' configuration objects. Configurations
+    can be saved to and restored from 'JSON' files, and each chart type has
+    a published 'JSON Schema' that other interfaces can implement.
+    Visualizations display as 'htmlwidgets' that automatically adapt to
+    light and dark themes, work in 'R Markdown', 'Quarto' and 'shiny', and
+    can be exported to Scalable Vector Graphics (SVG) files using
+    'Node.js'.
+URL: https://www.rtemis.org, https://docs.rtemis.org/r/draw,
+        https://docs.rtemis.org/r/draw-api
+BugReports: https://github.com/rtemis-org/draw/issues
+License: BSD_3_clause + file LICENSE
+Encoding: UTF-8
+Language: en-US
+SystemRequirements: Node.js (>= 18) for optional SVG export
+Depends: R (>= 4.4.0)
+Imports: htmltools, htmlwidgets, jsonlite, rtemis.core (>= 0.4.6), S7,
+        signal, stats, tools, utils, viridisLite
+Suggests: data.table, jsonvalidate (>= 1.5.0), mgcv, pROC, rmarkdown,
+        rtemis, rtemis.a3, shiny, survival, testthat (>= 3.0.0)
+Config/testthat/edition: 3
+Config/testthat/parallel: true
+Collate: 'rtemis.draw-package.R' 'rtemis_color_system.R' 'utils.R'
+        'styles.R' 'label.R' 'axis.R' 'components.R' 'series.R'
+        'series_sankey.R' 'option.R' 'theme.R' 'legend_layout.R'
+        'draw.R' 'chart_config.R' 'config_constraints.R'
+        'config_scatter.R' 'config_bar.R' 'config_density.R'
+        'config_histogram.R' 'distribution.R' 'annotations.R'
+        'fit_layer.R' 'fit_model.R' 'scatter_input.R' 'config_line.R'
+        'timeseries.R' 'scatter3d.R' 'surface_layer.R' 'config_pie.R'
+        'config_boxplot.R' 'config_sankey.R' 'config_gantt.R'
+        'chart_io.R' 'schema.R' 'network.R' 'map.R' 'config_network.R'
+        'config_choropleth.R' 'heatmap_input.R' 'config_heatmap.R'
+        'draw_a3.R' 'draw_protein.R' 'config_a3.R' 'draw_spectrogram.R'
+        'config_spectrogram.R' 'draw_gantt.R' 'draw_fit.R'
+        'draw_learning_curve.R' 'draw_varimp.R' 'config_significance.R'
+        'draw_significance.R' 'config_confusion.R' 'draw_confusion.R'
+        'config_roc.R' 'draw_roc.R' 'config_survival.R'
+        'draw_survival.R' 'draw_survfit.R' 'config_calibration.R'
+        'draw_calibration.R' 'boxplot_layers.R' 'draw_boxplot.R'
+        'draw_metric.R' 'draw_panels.R' 'export.R' 'zzz.R'
+Config/roxygen2/version: 8.1.0
+NeedsCompilation: no
+Packaged: 2026-10-01 00:39:52 UTC; sdg
+Author: E.D. Gennatas [aut, cre, cph] (ORCID:
+    <https://orcid.org/0000-0001-9280-3609>)
+Maintainer: E.D. Gennatas <gennatas@gmail.com>
+Repository: CRAN
+Date/Publication: 2026-10-13 14:10:02 UTC
